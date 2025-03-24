@@ -3,11 +3,13 @@ use std::{
     sync::OnceLock,
 };
 
-pub use buffer::{BytePacketBuffer, DnsQuestion, QueryType, Result, ResultCode};
-pub use format::DnsPacket;
+use buffer::{BytePacketBuffer, Result};
+use protocol::{DnsPacket, DnsQuestion, QueryType, ResultCode};
 
-mod buffer;
-mod format;
+pub mod buffer;
+pub mod cache;
+pub mod protocol;
+pub mod authority;
 
 pub static PERFER_V6: OnceLock<bool> = OnceLock::new();
 pub static DISABLE_V6: OnceLock<bool> = OnceLock::new();
@@ -24,7 +26,7 @@ pub fn lookup(qname: &str, qtype: QueryType, server: SocketAddr) -> Result<DnsPa
         .push(DnsQuestion::new(qname.to_string(), qtype));
 
     let mut req_buffer = BytePacketBuffer::new();
-    packet.write(&mut req_buffer)?;
+    packet.write(&mut req_buffer, 512)?;
     socket.send_to(&req_buffer.buf[0..req_buffer.pos], server)?;
 
     let mut res_buffer = BytePacketBuffer::new();
@@ -94,7 +96,7 @@ pub fn handle_query(socket: &UdpSocket) -> Result<()> {
 
     // The only thing remaining is to encode our response and send it off!
     let mut res_buffer = BytePacketBuffer::new();
-    packet.write(&mut res_buffer)?;
+    packet.write(&mut res_buffer, 512)?;
 
     let data = res_buffer.get_current_written_buffer()?;
 
