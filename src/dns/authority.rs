@@ -74,41 +74,31 @@ impl<'a> Zones {
     }
 
     pub fn load(&mut self) -> Result<()> {
-        let zones_dir = Path::new("zones").read_dir()?;
+        for wrapped_filename in Path::new("zones").read_dir()? {
+            if let Ok(filename) = wrapped_filename {
+                if let Ok(mut zone_file) = File::open(filename.path()) {
+                    let mut buffer = StreamPacketBuffer::new(&mut zone_file);
+                    let mut zone = Zone::new(String::new(), String::new(), String::new());
+                    buffer.read_qname(&mut zone.domain)?;
+                    buffer.read_qname(&mut zone.m_name)?;
+                    buffer.read_qname(&mut zone.r_name)?;
+                    zone.serial = buffer.read_u32()?;
+                    zone.refresh = buffer.read_u32()?;
+                    zone.retry = buffer.read_u32()?;
+                    zone.expire = buffer.read_u32()?;
+                    zone.minimum = buffer.read_u32()?;
+                    let record_count = buffer.read_u32()?;
 
-        for wrapped_filename in zones_dir {
-            let filename = match wrapped_filename {
-                Ok(x) => x,
-                Err(_) => continue,
-            };
+                    for _ in 0..record_count {
+                        let rr = DnsRecord::read(&mut buffer)?;
+                        zone.add_record(&rr);
+                    }
 
-            let mut zone_file = match File::open(filename.path()) {
-                Ok(x) => x,
-                Err(_) => continue,
-            };
+                    println!("Loaded zone {} with {} records", zone.domain, record_count);
 
-            let mut buffer = StreamPacketBuffer::new(&mut zone_file);
-
-            let mut zone = Zone::new(String::new(), String::new(), String::new());
-            buffer.read_qname(&mut zone.domain)?;
-            buffer.read_qname(&mut zone.m_name)?;
-            buffer.read_qname(&mut zone.r_name)?;
-            zone.serial = buffer.read_u32()?;
-            zone.refresh = buffer.read_u32()?;
-            zone.retry = buffer.read_u32()?;
-            zone.expire = buffer.read_u32()?;
-            zone.minimum = buffer.read_u32()?;
-
-            let record_count = buffer.read_u32()?;
-
-            for _ in 0..record_count {
-                let rr = DnsRecord::read(&mut buffer)?;
-                zone.add_record(&rr);
+                    self.zones.insert(zone.domain.clone(), zone);
+                };
             }
-
-            println!("Loaded zone {} with {} records", zone.domain, record_count);
-
-            self.zones.insert(zone.domain.clone(), zone);
         }
 
         Ok(())
