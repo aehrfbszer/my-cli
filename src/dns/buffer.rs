@@ -1,9 +1,7 @@
-use std::{
-    collections::BTreeMap,
-    io::{self, Read},
-};
+use std::{collections::BTreeMap, io};
 
 use thiserror::Error;
+use tokio::io::AsyncReadExt;
 
 #[derive(Error, Debug)]
 pub enum PacketBufferOpError {
@@ -16,9 +14,9 @@ pub enum PacketBufferOpError {
 pub type Result<T> = std::result::Result<T, PacketBufferOpError>;
 
 pub trait PacketBuffer {
-    fn read(&mut self) -> Result<u8>;
-    fn get(&mut self, pos: usize) -> Result<u8>;
-    fn get_range(&mut self, start: usize, len: usize) -> Result<&[u8]>;
+    async fn read(&mut self) -> Result<u8>;
+    async fn get(&mut self, pos: usize) -> Result<u8>;
+    async fn get_range(&mut self, start: usize, len: usize) -> Result<&[u8]>;
     fn write(&mut self, val: u8) -> Result<()>;
     fn set(&mut self, pos: usize, val: u8) -> Result<()>;
     fn pos(&self) -> usize;
@@ -87,28 +85,28 @@ pub trait PacketBuffer {
         Ok(())
     }
 
-    fn read_u16(&mut self) -> Result<u16> {
-        let res = ((self.read()? as u16) << 8) | (self.read()? as u16);
+    async fn read_u16(&mut self) -> Result<u16> {
+        let res = ((self.read().await? as u16) << 8) | (self.read().await? as u16);
 
         Ok(res)
     }
 
-    fn read_u32(&mut self) -> Result<u32> {
-        let res = ((self.read()? as u32) << 24)
-            | ((self.read()? as u32) << 16)
-            | ((self.read()? as u32) << 8)
-            | ((self.read()? as u32) << 0);
+    async fn read_u32(&mut self) -> Result<u32> {
+        let res = ((self.read().await? as u32) << 24)
+            | ((self.read().await? as u32) << 16)
+            | ((self.read().await? as u32) << 8)
+            | ((self.read().await? as u32) << 0);
 
         Ok(res)
     }
 
-    fn read_qname(&mut self, outstr: &mut String) -> Result<()> {
+    async fn read_qname(&mut self, outstr: &mut String) -> Result<()> {
         let mut pos = self.pos();
         let mut jumped = false;
 
         let mut delim = "";
         loop {
-            let len = self.get(pos)?;
+            let len = self.get(pos).await?;
 
             // A two byte sequence, where the two highest bits of the first byte is
             // set, represents a offset relative to the start of the buffer. We
@@ -121,7 +119,7 @@ pub trait PacketBuffer {
                     self.seek(pos + 2)?;
                 }
 
-                let b2 = self.get(pos + 1)? as u16;
+                let b2 = self.get(pos + 1).await? as u16;
                 let offset = (((len as u16) ^ 0xC0) << 8) | b2;
                 pos = offset as usize;
                 jumped = true;
@@ -137,7 +135,7 @@ pub trait PacketBuffer {
 
             outstr.push_str(delim);
 
-            let str_buffer = self.get_range(pos, len as usize)?;
+            let str_buffer = self.get_range(pos, len as usize).await?;
             outstr.push_str(&String::from_utf8_lossy(str_buffer).to_lowercase());
 
             delim = ".";
@@ -179,18 +177,18 @@ impl PacketBuffer for VectorPacketBuffer {
         self.label_lookup.insert(label.to_string(), pos);
     }
 
-    fn read(&mut self) -> Result<u8> {
+    async fn read(&mut self) -> Result<u8> {
         let res = self.buffer[self.pos];
         self.pos += 1;
 
         Ok(res)
     }
 
-    fn get(&mut self, pos: usize) -> Result<u8> {
+    async fn get(&mut self, pos: usize) -> Result<u8> {
         Ok(self.buffer[pos])
     }
 
-    fn get_range(&mut self, start: usize, len: usize) -> Result<&[u8]> {
+    async fn get_range(&mut self, start: usize, len: usize) -> Result<&[u8]> {
         Ok(&self.buffer[start..start + len as usize])
     }
 
@@ -238,9 +236,9 @@ impl BytePacketBuffer {
         }
     }
 
-    pub fn get_current_written_buffer(&mut self) -> Result<&[u8]> {
+    pub async fn get_current_written_buffer(&mut self) -> Result<&[u8]> {
         let len = self.pos();
-        Ok(self.get_range(0, len)?)
+        Ok(self.get_range(0, len).await?)
     }
 }
 
@@ -267,7 +265,7 @@ impl PacketBuffer for BytePacketBuffer {
     }
 
     /// Read a single byte and move the position one step forward
-    fn read(&mut self) -> Result<u8> {
+    async fn read(&mut self) -> Result<u8> {
         if self.pos >= 512 {
             return Err(PacketBufferOpError::BufferEnd("read out of the index"));
         }
@@ -278,7 +276,7 @@ impl PacketBuffer for BytePacketBuffer {
     }
 
     /// Get a single byte, without changing the buffer position
-    fn get(&mut self, pos: usize) -> Result<u8> {
+    async fn get(&mut self, pos: usize) -> Result<u8> {
         if pos >= 512 {
             return Err(PacketBufferOpError::BufferEnd("get out of the index"));
         }
@@ -286,7 +284,7 @@ impl PacketBuffer for BytePacketBuffer {
     }
 
     /// Get a range of bytes
-    fn get_range(&mut self, start: usize, len: usize) -> Result<&[u8]> {
+    async fn get_range(&mut self, start: usize, len: usize) -> Result<&[u8]> {
         if start + len >= 512 {
             return Err(PacketBufferOpError::BufferEnd("Get range out of the index"));
         }
@@ -320,7 +318,7 @@ impl PacketBuffer for BytePacketBuffer {
 // tcp
 pub struct StreamPacketBuffer<'a, T>
 where
-    T: Read,
+    T: AsyncReadExt,
 {
     pub stream: &'a mut T,
     pub buffer: Vec<u8>,
@@ -329,7 +327,7 @@ where
 
 impl<'a, T> StreamPacketBuffer<'a, T>
 where
-    T: Read + 'a,
+    T: AsyncReadExt + 'a,
 {
     pub fn new(stream: &mut T) -> StreamPacketBuffer<T> {
         StreamPacketBuffer {
@@ -342,7 +340,7 @@ where
 
 impl<'a, T> PacketBuffer for StreamPacketBuffer<'a, T>
 where
-    T: Read + 'a,
+    T: AsyncReadExt + 'a + Unpin,
 {
     fn find_label(&self, _: &str) -> Option<usize> {
         None
@@ -352,10 +350,10 @@ where
         unimplemented!();
     }
 
-    fn read(&mut self) -> Result<u8> {
+    async fn read(&mut self) -> Result<u8> {
         while self.pos >= self.buffer.len() {
             let mut local_buffer = [0; 1];
-            self.stream.read(&mut local_buffer)?;
+            self.stream.read(&mut local_buffer).await?;
             self.buffer.push(local_buffer[0]);
         }
 
@@ -365,20 +363,20 @@ where
         Ok(res)
     }
 
-    fn get(&mut self, pos: usize) -> Result<u8> {
+    async fn get(&mut self, pos: usize) -> Result<u8> {
         while pos >= self.buffer.len() {
             let mut local_buffer = [0; 1];
-            self.stream.read(&mut local_buffer)?;
+            self.stream.read(&mut local_buffer).await?;
             self.buffer.push(local_buffer[0]);
         }
 
         Ok(self.buffer[pos])
     }
 
-    fn get_range(&mut self, start: usize, len: usize) -> Result<&[u8]> {
+    async fn get_range(&mut self, start: usize, len: usize) -> Result<&[u8]> {
         while start + len > self.buffer.len() {
             let mut local_buffer = [0; 1];
-            self.stream.read(&mut local_buffer)?;
+            self.stream.read(&mut local_buffer).await?;
             self.buffer.push(local_buffer[0]);
         }
 

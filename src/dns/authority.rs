@@ -1,11 +1,11 @@
 //! contains the data store for local zones
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::File;
-use std::io::Write;
 use std::path::Path;
 use std::sync::{LockResult, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use thiserror::Error;
+use tokio::fs::File;
+use tokio::io::AsyncWriteExt;
 
 use crate::dns::buffer::{PacketBuffer, StreamPacketBuffer, VectorPacketBuffer};
 use crate::dns::protocol::{DnsPacket, DnsRecord, QueryType, ResultCode, TransientTtl};
@@ -73,24 +73,24 @@ impl<'a> Zones {
         }
     }
 
-    pub fn load(&mut self) -> Result<()> {
+    pub async fn load(&mut self) -> Result<()> {
         for wrapped_filename in Path::new("zones").read_dir()? {
             if let Ok(filename) = wrapped_filename {
-                if let Ok(mut zone_file) = File::open(filename.path()) {
+                if let Ok(mut zone_file) = File::open(filename.path()).await {
                     let mut buffer = StreamPacketBuffer::new(&mut zone_file);
                     let mut zone = Zone::new(String::new(), String::new(), String::new());
-                    buffer.read_qname(&mut zone.domain)?;
-                    buffer.read_qname(&mut zone.m_name)?;
-                    buffer.read_qname(&mut zone.r_name)?;
-                    zone.serial = buffer.read_u32()?;
-                    zone.refresh = buffer.read_u32()?;
-                    zone.retry = buffer.read_u32()?;
-                    zone.expire = buffer.read_u32()?;
-                    zone.minimum = buffer.read_u32()?;
-                    let record_count = buffer.read_u32()?;
+                    buffer.read_qname(&mut zone.domain).await?;
+                    buffer.read_qname(&mut zone.m_name).await?;
+                    buffer.read_qname(&mut zone.r_name).await?;
+                    zone.serial = buffer.read_u32().await?;
+                    zone.refresh = buffer.read_u32().await?;
+                    zone.retry = buffer.read_u32().await?;
+                    zone.expire = buffer.read_u32().await?;
+                    zone.minimum = buffer.read_u32().await?;
+                    let record_count = buffer.read_u32().await?;
 
                     for _ in 0..record_count {
-                        let rr = DnsRecord::read(&mut buffer)?;
+                        let rr = DnsRecord::read(&mut buffer).await?;
                         zone.add_record(&rr);
                     }
 
@@ -104,11 +104,11 @@ impl<'a> Zones {
         Ok(())
     }
 
-    pub fn save(&mut self) -> Result<()> {
+    pub async fn save(&mut self) -> Result<()> {
         let zones_dir = Path::new("zones");
         for zone in self.zones.values() {
             let filename = zones_dir.join(Path::new(&zone.domain));
-            let mut zone_file = match File::create(&filename) {
+            let mut zone_file = match File::create(&filename).await {
                 Ok(x) => x,
                 Err(_) => {
                     println!("Failed to save file {:?}", filename);
@@ -131,7 +131,7 @@ impl<'a> Zones {
                 let _ = rec.write(&mut buffer);
             }
 
-            let _ = zone_file.write(&buffer.buffer[0..buffer.pos]);
+            let _ = zone_file.write(&buffer.buffer[0..buffer.pos]).await;
         }
 
         Ok(())
@@ -166,12 +166,12 @@ impl Authority {
         }
     }
 
-    pub fn load(&self) -> Result<()> {
+    pub async fn load(&self) -> Result<()> {
         let mut zones = self
             .zones
             .write()
             .map_err(|e| AuthorityError::PoisonedLock(e.to_string()))?;
-        zones.load()?;
+        zones.load().await?;
 
         Ok(())
     }

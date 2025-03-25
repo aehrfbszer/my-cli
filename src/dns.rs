@@ -6,14 +6,16 @@ use std::{
 use buffer::{BytePacketBuffer, Result};
 use protocol::{DnsPacket, DnsQuestion, QueryType, ResultCode};
 
+pub mod authority;
 pub mod buffer;
 pub mod cache;
+pub mod client;
+pub mod netutil;
 pub mod protocol;
-pub mod authority;
 
 pub static PERFER_V6: OnceLock<bool> = OnceLock::new();
 pub static DISABLE_V6: OnceLock<bool> = OnceLock::new();
-pub fn lookup(qname: &str, qtype: QueryType, server: SocketAddr) -> Result<DnsPacket> {
+pub async fn lookup(qname: &str, qtype: QueryType, server: SocketAddr) -> Result<DnsPacket> {
     let socket = UdpSocket::bind(("0.0.0.0", 43210))?;
 
     let mut packet = DnsPacket::new();
@@ -32,11 +34,11 @@ pub fn lookup(qname: &str, qtype: QueryType, server: SocketAddr) -> Result<DnsPa
     let mut res_buffer = BytePacketBuffer::new();
     socket.recv_from(&mut res_buffer.buf)?;
 
-    DnsPacket::from_buffer(&mut res_buffer)
+    DnsPacket::from_buffer(&mut res_buffer).await
 }
 
 /// Handle a single incoming packet
-pub fn handle_query(socket: &UdpSocket) -> Result<()> {
+pub async fn handle_query(socket: &UdpSocket) -> Result<()> {
     // With a socket ready, we can go ahead and read a packet. This will
     // block until one is received.
     let mut req_buffer = BytePacketBuffer::new();
@@ -49,7 +51,7 @@ pub fn handle_query(socket: &UdpSocket) -> Result<()> {
 
     // Next, `DnsPacket::from_buffer` is used to parse the raw bytes into
     // a `DnsPacket`.
-    let mut request = DnsPacket::from_buffer(&mut req_buffer)?;
+    let mut request = DnsPacket::from_buffer(&mut req_buffer).await?;
 
     // Create and initialize the response packet
     let mut packet = DnsPacket::new();
@@ -67,7 +69,7 @@ pub fn handle_query(socket: &UdpSocket) -> Result<()> {
         // fail, in which case the `SERVFAIL` response code is set to indicate
         // as much to the client. If rather everything goes as planned, the
         // question and response records as copied into our response packet.
-        if let Ok(result) = recursive_lookup(&question.name, question.qtype) {
+        if let Ok(result) = recursive_lookup(&question.name, question.qtype).await {
             packet.questions.push(question);
             packet.header.rescode = result.header.rescode;
 
@@ -98,14 +100,14 @@ pub fn handle_query(socket: &UdpSocket) -> Result<()> {
     let mut res_buffer = BytePacketBuffer::new();
     packet.write(&mut res_buffer, 512)?;
 
-    let data = res_buffer.get_current_written_buffer()?;
+    let data = res_buffer.get_current_written_buffer().await?;
 
     socket.send_to(data, src)?;
 
     Ok(())
 }
 
-pub fn recursive_lookup(qname: &str, qtype: QueryType) -> Result<DnsPacket> {
+pub async fn recursive_lookup(qname: &str, qtype: QueryType) -> Result<DnsPacket> {
     // For now we're always starting with *a.root-servers.net*.
     let mut ns = IpAddr::V4(Ipv4Addr::new(198, 41, 0, 4));
 
@@ -119,7 +121,7 @@ pub fn recursive_lookup(qname: &str, qtype: QueryType) -> Result<DnsPacket> {
         let ns_copy = ns;
 
         let server = (ns_copy, 53);
-        let response = lookup(qname, qtype, server.into())?;
+        let response = lookup(qname, qtype, server.into()).await?;
 
         // If there are entries in the answer section, and no errors, we are done!
         if !response.answers.is_empty() && response.header.rescode == ResultCode::NOERROR {
@@ -151,7 +153,7 @@ pub fn recursive_lookup(qname: &str, qtype: QueryType) -> Result<DnsPacket> {
         // Here we go down the rabbit hole by starting _another_ lookup sequence in the
         // midst of our current one. Hopefully, this will give us the IP of an appropriate
         // name server.
-        let recursive_response = recursive_lookup(&new_ns_name, QueryType::A)?;
+        let recursive_response = Box::pin(recursive_lookup(&new_ns_name, QueryType::A)).await?;
 
         // Finally, we pick a random ip from the result, and restart the loop. If no such
         // record is available, we again return the last result we got.

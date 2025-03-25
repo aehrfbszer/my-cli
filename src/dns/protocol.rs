@@ -147,19 +147,19 @@ pub enum DnsRecord {
 }
 
 impl DnsRecord {
-    pub fn read<T: PacketBuffer>(buffer: &mut T) -> Result<DnsRecord> {
+    pub async fn read<T: PacketBuffer>(buffer: &mut T) -> Result<DnsRecord> {
         let mut domain = String::new();
-        buffer.read_qname(&mut domain)?;
+        buffer.read_qname(&mut domain).await?;
 
-        let qtype_num = buffer.read_u16()?;
+        let qtype_num = buffer.read_u16().await?;
         let qtype = QueryType::from_num(qtype_num);
-        let class = buffer.read_u16()?;
-        let ttl = buffer.read_u32()?;
-        let data_len = buffer.read_u16()?;
+        let class = buffer.read_u16().await?;
+        let ttl = buffer.read_u32().await?;
+        let data_len = buffer.read_u16().await?;
 
         match qtype {
             QueryType::A => {
-                let raw_addr = buffer.read_u32()?;
+                let raw_addr = buffer.read_u32().await?;
                 let addr = Ipv4Addr::new(
                     ((raw_addr >> 24) & 0xFF) as u8,
                     ((raw_addr >> 16) & 0xFF) as u8,
@@ -174,10 +174,10 @@ impl DnsRecord {
                 })
             }
             QueryType::AAAA => {
-                let raw_addr1 = buffer.read_u32()?;
-                let raw_addr2 = buffer.read_u32()?;
-                let raw_addr3 = buffer.read_u32()?;
-                let raw_addr4 = buffer.read_u32()?;
+                let raw_addr1 = buffer.read_u32().await?;
+                let raw_addr2 = buffer.read_u32().await?;
+                let raw_addr3 = buffer.read_u32().await?;
+                let raw_addr4 = buffer.read_u32().await?;
                 let addr = Ipv6Addr::new(
                     ((raw_addr1 >> 16) & 0xFFFF) as u16,
                     ((raw_addr1 >> 0) & 0xFFFF) as u16,
@@ -197,7 +197,7 @@ impl DnsRecord {
             }
             QueryType::NS => {
                 let mut ns = String::new();
-                buffer.read_qname(&mut ns)?;
+                buffer.read_qname(&mut ns).await?;
 
                 Ok(DnsRecord::NS {
                     domain: domain,
@@ -207,7 +207,7 @@ impl DnsRecord {
             }
             QueryType::CNAME => {
                 let mut cname = String::new();
-                buffer.read_qname(&mut cname)?;
+                buffer.read_qname(&mut cname).await?;
 
                 Ok(DnsRecord::CNAME {
                     domain: domain,
@@ -216,12 +216,12 @@ impl DnsRecord {
                 })
             }
             QueryType::SRV => {
-                let priority = buffer.read_u16()?;
-                let weight = buffer.read_u16()?;
-                let port = buffer.read_u16()?;
+                let priority = buffer.read_u16().await?;
+                let weight = buffer.read_u16().await?;
+                let port = buffer.read_u16().await?;
 
                 let mut srv = String::new();
-                buffer.read_qname(&mut srv)?;
+                buffer.read_qname(&mut srv).await?;
 
                 Ok(DnsRecord::SRV {
                     domain: domain,
@@ -233,9 +233,9 @@ impl DnsRecord {
                 })
             }
             QueryType::MX => {
-                let priority = buffer.read_u16()?;
+                let priority = buffer.read_u16().await?;
                 let mut mx = String::new();
-                buffer.read_qname(&mut mx)?;
+                buffer.read_qname(&mut mx).await?;
 
                 Ok(DnsRecord::MX {
                     domain: domain,
@@ -246,16 +246,16 @@ impl DnsRecord {
             }
             QueryType::SOA => {
                 let mut m_name = String::new();
-                buffer.read_qname(&mut m_name)?;
+                buffer.read_qname(&mut m_name).await?;
 
                 let mut r_name = String::new();
-                buffer.read_qname(&mut r_name)?;
+                buffer.read_qname(&mut r_name).await?;
 
-                let serial = buffer.read_u32()?;
-                let refresh = buffer.read_u32()?;
-                let retry = buffer.read_u32()?;
-                let expire = buffer.read_u32()?;
-                let minimum = buffer.read_u32()?;
+                let serial = buffer.read_u32().await?;
+                let refresh = buffer.read_u32().await?;
+                let retry = buffer.read_u32().await?;
+                let expire = buffer.read_u32().await?;
+                let minimum = buffer.read_u32().await?;
 
                 Ok(DnsRecord::SOA {
                     domain: domain,
@@ -274,7 +274,7 @@ impl DnsRecord {
 
                 let cur_pos = buffer.pos();
                 txt.push_str(&String::from_utf8_lossy(
-                    buffer.get_range(cur_pos, data_len as usize)?,
+                    buffer.get_range(cur_pos, data_len as usize).await?,
                 ));
 
                 buffer.step(data_len as usize)?;
@@ -290,7 +290,7 @@ impl DnsRecord {
 
                 let cur_pos = buffer.pos();
                 data.push_str(&String::from_utf8_lossy(
-                    buffer.get_range(cur_pos, data_len as usize)?,
+                    buffer.get_range(cur_pos, data_len as usize).await?,
                 ));
                 buffer.step(data_len as usize)?;
 
@@ -632,10 +632,10 @@ impl DnsHeader {
         }
     }
 
-    pub fn read<T: PacketBuffer>(&mut self, buffer: &mut T) -> Result<()> {
-        self.id = buffer.read_u16()?;
+    pub async fn read<T: PacketBuffer>(&mut self, buffer: &mut T) -> Result<()> {
+        self.id = buffer.read_u16().await?;
 
-        let flags = buffer.read_u16()?;
+        let flags = buffer.read_u16().await?;
         let a = (flags >> 8) as u8;
         let b = (flags & 0xFF) as u8;
 
@@ -651,10 +651,10 @@ impl DnsHeader {
         self.checking_disabled = (b & (1 << 4)) > 0; // b的从左到右第4位
         self.rescode = ResultCode::from_num(b & 0x0F); // b按位与0x0F，得到这4位的低4位
 
-        self.questions = buffer.read_u16()?;
-        self.answers = buffer.read_u16()?;
-        self.authoritative_entries = buffer.read_u16()?;
-        self.resource_entries = buffer.read_u16()?;
+        self.questions = buffer.read_u16().await?;
+        self.answers = buffer.read_u16().await?;
+        self.authoritative_entries = buffer.read_u16().await?;
+        self.resource_entries = buffer.read_u16().await?;
 
         Ok(())
     }
@@ -758,10 +758,10 @@ impl DnsQuestion {
         Ok(())
     }
 
-    pub fn read<T: PacketBuffer>(&mut self, buffer: &mut T) -> Result<()> {
-        buffer.read_qname(&mut self.name)?;
-        self.qtype = QueryType::from_num(buffer.read_u16()?); // qtype
-        let _ = buffer.read_u16()?; // class
+    pub async fn read<T: PacketBuffer>(&mut self, buffer: &mut T) -> Result<()> {
+        buffer.read_qname(&mut self.name).await?;
+        self.qtype = QueryType::from_num(buffer.read_u16().await?); // qtype
+        let _ = buffer.read_u16().await?; // class
 
         Ok(())
     }
@@ -797,26 +797,26 @@ impl DnsPacket {
         }
     }
 
-    pub fn from_buffer<T: PacketBuffer>(buffer: &mut T) -> Result<DnsPacket> {
+    pub async fn from_buffer<T: PacketBuffer>(buffer: &mut T) -> Result<DnsPacket> {
         let mut result = DnsPacket::new();
-        result.header.read(buffer)?;
+        result.header.read(buffer).await?;
 
         for _ in 0..result.header.questions {
             let mut question = DnsQuestion::new("".to_string(), QueryType::UNKNOWN(0));
-            question.read(buffer)?;
+            question.read(buffer).await?;
             result.questions.push(question);
         }
 
         for _ in 0..result.header.answers {
-            let rec = DnsRecord::read(buffer)?;
+            let rec = DnsRecord::read(buffer).await?;
             result.answers.push(rec);
         }
         for _ in 0..result.header.authoritative_entries {
-            let rec = DnsRecord::read(buffer)?;
+            let rec = DnsRecord::read(buffer).await?;
             result.authorities.push(rec);
         }
         for _ in 0..result.header.resource_entries {
-            let rec = DnsRecord::read(buffer)?;
+            let rec = DnsRecord::read(buffer).await?;
             result.resources.push(rec);
         }
 
