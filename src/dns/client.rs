@@ -2,7 +2,6 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
-        mpsc::{Sender, channel},
     },
     time::Duration,
 };
@@ -12,6 +11,7 @@ use thiserror::Error;
 use tokio::{
     io::AsyncWriteExt,
     net::{TcpStream, UdpSocket},
+    sync::mpsc::{Receiver, Sender, channel},
     time::sleep,
 };
 
@@ -66,7 +66,7 @@ pub struct DnsNetworkClient {
     seq: AtomicUsize,
 
     /// The listener socket
-    socket: Arc<Mutex<UdpSocket>>,
+    socket: Arc<UdpSocket>,
 
     /// Queries in progress
     pending_queries: Arc<Mutex<Vec<PendingQuery>>>,
@@ -87,9 +87,7 @@ impl DnsNetworkClient {
             total_sent: AtomicUsize::new(0),
             total_failed: AtomicUsize::new(0),
             seq: AtomicUsize::new(0),
-            socket: Arc::new(Mutex::new(
-                UdpSocket::bind(("0.0.0.0", port)).await.unwrap(),
-            )),
+            socket: Arc::new(UdpSocket::bind(("0.0.0.0", port)).await.unwrap()),
             pending_queries: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -114,7 +112,7 @@ impl DnsNetworkClient {
         if packet.header.id + 1 == 0xFFFF {
             let _ = self
                 .seq
-                .compare_exchange_weak(0xffff, 0, Ordering::SeqCst, Ordering::SeqCst);
+                .compare_exchange(0xffff, 0, Ordering::SeqCst, Ordering::SeqCst);
         }
 
         packet.header.questions = 1;
@@ -153,7 +151,7 @@ impl DnsNetworkClient {
         qtype: QueryType,
         server: (&str, u16),
         recursive: bool,
-    ) -> Result<DnsPacket> {
+    ) -> Result<Receiver<Option<DnsPacket>>> {
         let _ = self.total_sent.fetch_add(1, Ordering::Release);
 
         // Prepare request
@@ -175,7 +173,7 @@ impl DnsNetworkClient {
 
         // Create a return channel, and add a `PendingQuery` to the list of lookups
         // in progress
-        let (tx, rx) = channel();
+        let (tx, mut rx) = channel(100);
         {
             let mut pending_queries = self
                 .pending_queries
@@ -192,23 +190,10 @@ impl DnsNetworkClient {
         let mut req_buffer = BytePacketBuffer::new();
         packet.write(&mut req_buffer, 512)?;
         self.socket
-            .lock()
-            .unwrap()
             .send_to(&req_buffer.buf[0..req_buffer.pos], server)
             .await?;
-
         // Wait for response
-        match rx.recv() {
-            Ok(Some(qr)) => Ok(qr),
-            Ok(None) => {
-                let _ = self.total_failed.fetch_add(1, Ordering::Release);
-                Err(ClientError::TimeOut)
-            }
-            Err(_) => {
-                let _ = self.total_failed.fetch_add(1, Ordering::Release);
-                Err(ClientError::LookupFailed)
-            }
-        }
+        Ok(rx)
     }
 }
 
@@ -246,6 +231,7 @@ impl DnsClient for DnsNetworkClient {
                             pending_queries.remove(*idx);
                         }
                     }
+                    println!("aaaaaaaaaaa");
 
                     sleep(Duration::from_millis(100)).await;
                 }
@@ -255,49 +241,46 @@ impl DnsClient for DnsNetworkClient {
         let pending_queries_lock = self.pending_queries.clone();
         let socket_copy = self.socket.clone();
 
-        tokio::spawn(async move {
-            let mut res_buffer = BytePacketBuffer::new();
-            loop {
-                let ss = socket_copy.lock().unwrap();
-                if let Ok(_) = ss.recv_from(&mut res_buffer.buf).await {
-                    match DnsPacket::from_buffer(&mut res_buffer).await {
-                        Ok(packet) => {
-                            // Acquire a lock on the pending_queries list, and search for a
-                            // matching PendingQuery to which to deliver the response.
-                            if let Ok(mut pending_queries) = pending_queries_lock.lock() {
-                                let mut matched_query = None;
-                                for (i, pending_query) in pending_queries.iter().enumerate() {
-                                    if pending_query.seq == packet.header.id {
-                                        // Matching query found, send the response
-                                        let _ = pending_query.tx.send(Some(packet.clone()));
+        let mut res_buffer = BytePacketBuffer::new();
+        loop {
+            if let Ok(_) = socket_copy.recv_from(&mut res_buffer.buf).await {
+                match DnsPacket::from_buffer(&mut res_buffer).await {
+                    Ok(packet) => {
+                        // Acquire a lock on the pending_queries list, and search for a
+                        // matching PendingQuery to which to deliver the response.
+                        if let Ok(mut pending_queries) = pending_queries_lock.lock() {
+                            let mut matched_query = None;
+                            for (i, pending_query) in pending_queries.iter().enumerate() {
+                                if pending_query.seq == packet.header.id {
+                                    // Matching query found, send the response
+                                    let _ = pending_query.tx.send(Some(packet.clone()));
 
-                                        // Mark this index for removal from list
-                                        matched_query = Some(i);
+                                    // Mark this index for removal from list
+                                    matched_query = Some(i);
 
-                                        break;
-                                    }
-                                }
-
-                                if let Some(idx) = matched_query {
-                                    pending_queries.remove(idx);
-                                } else {
-                                    println!("Discarding response for: {:?}", packet.questions[0]);
+                                    break;
                                 }
                             }
+
+                            if let Some(idx) = matched_query {
+                                pending_queries.remove(idx);
+                            } else {
+                                println!("Discarding response for: {:?}", packet.questions[0]);
+                            }
                         }
-                        Err(err) => {
-                            println!(
-                                "DnsNetworkClient failed to parse packet with error: {}",
-                                err
-                            );
-                            continue;
-                        }
+                    }
+                    Err(err) => {
+                        println!(
+                            "DnsNetworkClient failed to parse packet with error: {}",
+                            err
+                        );
+                        continue;
                     }
                 }
             }
-        });
+        }
 
-        Ok(())
+        // Ok(())
     }
 
     async fn send_query(
@@ -307,9 +290,27 @@ impl DnsClient for DnsNetworkClient {
         server: (&str, u16),
         recursive: bool,
     ) -> Result<DnsPacket> {
-        let packet = self.send_udp_query(qname, qtype, server, recursive).await?;
-        if !packet.header.truncated_message {
-            return Ok(packet);
+        let mut rx = self.send_udp_query(qname, qtype, server, recursive).await?;
+
+        let mut packet = Err(ClientError::LookupFailed);
+        while let Some(rr) = rx.recv().await {
+            match rr {
+                Some(qr) => {
+                    packet = Ok(qr);
+                }
+                None => {
+                    let _ = self.total_failed.fetch_add(1, Ordering::Release);
+                    packet = Err(ClientError::TimeOut);
+                }
+            }
+        }
+
+        if let Ok(packet) = packet {
+            if !packet.header.truncated_message {
+                return Ok(packet);
+            }
+        } else {
+            return packet;
         }
 
         println!("Truncated response - resending as TCP");
@@ -365,21 +366,29 @@ pub mod tests {
     #[tokio::test]
     pub async fn test_udp_client() {
         let client = DnsNetworkClient::new(31456).await;
-        client.run().await.unwrap();
 
-        let res = client
+        let mut rx = client
             .send_udp_query("google.com", QueryType::A, ("8.8.8.8", 53), true)
             .await
             .unwrap();
 
-        assert_eq!(res.questions[0].name, "google.com");
-        assert!(res.answers.len() > 0);
+        tokio::spawn(async move {
+            client.run().await.unwrap();
+        });
+        while let Some(res) = rx.recv().await {
+            let res = res.unwrap();
 
-        match res.answers[0] {
-            DnsRecord::A { ref domain, .. } => {
-                assert_eq!("google.com", domain);
+            assert_eq!(res.questions[0].name, "google.com");
+            assert!(res.answers.len() > 0);
+
+            match res.answers[0] {
+                DnsRecord::A { ref domain, .. } => {
+                    assert_eq!("google.com", domain);
+                }
+                _ => panic!(),
             }
-            _ => panic!(),
+
+            break;
         }
     }
 

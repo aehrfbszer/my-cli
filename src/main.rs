@@ -3,7 +3,8 @@ use std::net::UdpSocket;
 
 mod dns;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Hello, world!");
     println!("Hello, world!");
 
@@ -13,7 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // For now, queries are handled sequentially, so an infinite loop for servicing
     // requests is initiated.
     loop {
-        match handle_query(&socket) {
+        match handle_query(&socket).await {
             Ok(_) => {}
             Err(e) => eprintln!("An error occurred: {}", e),
         }
