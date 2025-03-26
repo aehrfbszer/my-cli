@@ -1,4 +1,5 @@
 use std::{
+    net::IpAddr,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -6,6 +7,7 @@ use std::{
     time::Duration,
 };
 
+use async_trait::async_trait;
 use chrono::{DateTime, Local};
 use thiserror::Error;
 use tokio::{
@@ -37,7 +39,8 @@ pub enum ClientError {
 
 type Result<T> = std::result::Result<T, ClientError>;
 
-pub trait DnsClient {
+#[async_trait]
+pub trait DnsClient: Send + Sync {
     fn get_sent_count(&self) -> usize;
     fn get_failed_count(&self) -> usize;
 
@@ -46,7 +49,7 @@ pub trait DnsClient {
         &self,
         qname: &str,
         qtype: QueryType,
-        server: (&str, u16),
+        server: (IpAddr, u16),
         recursive: bool,
     ) -> Result<DnsPacket>;
 }
@@ -100,7 +103,7 @@ impl DnsNetworkClient {
         &self,
         qname: &str,
         qtype: QueryType,
-        server: (&str, u16),
+        server: (IpAddr, u16),
         recursive: bool,
     ) -> Result<DnsPacket> {
         let _ = self.total_sent.fetch_add(1, Ordering::Release);
@@ -149,7 +152,7 @@ impl DnsNetworkClient {
         &self,
         qname: &str,
         qtype: QueryType,
-        server: (&str, u16),
+        server: (IpAddr, u16),
         recursive: bool,
     ) -> Result<Receiver<Option<DnsPacket>>> {
         let _ = self.total_sent.fetch_add(1, Ordering::Release);
@@ -173,7 +176,7 @@ impl DnsNetworkClient {
 
         // Create a return channel, and add a `PendingQuery` to the list of lookups
         // in progress
-        let (tx, mut rx) = channel(100);
+        let (tx, rx) = channel(100);
         {
             let mut pending_queries = self
                 .pending_queries
@@ -197,6 +200,7 @@ impl DnsNetworkClient {
     }
 }
 
+#[async_trait]
 impl DnsClient for DnsNetworkClient {
     fn get_sent_count(&self) -> usize {
         self.total_sent.load(Ordering::Acquire)
@@ -287,7 +291,7 @@ impl DnsClient for DnsNetworkClient {
         &self,
         qname: &str,
         qtype: QueryType,
-        server: (&str, u16),
+        server: (IpAddr, u16),
         recursive: bool,
     ) -> Result<DnsPacket> {
         let mut rx = self.send_udp_query(qname, qtype, server, recursive).await?;
@@ -321,10 +325,12 @@ impl DnsClient for DnsNetworkClient {
 #[cfg(test)]
 pub mod tests {
 
+    use std::net::Ipv4Addr;
+
     use super::*;
     use crate::dns::protocol::{DnsPacket, DnsRecord, QueryType};
 
-    pub type StubCallback = dyn Fn(&str, QueryType, (&str, u16), bool) -> Result<DnsPacket>;
+    pub type StubCallback = dyn Fn(&str, QueryType, (IpAddr, u16), bool) -> Result<DnsPacket>;
 
     pub struct DnsStubClient {
         callback: Box<StubCallback>,
@@ -339,6 +345,7 @@ pub mod tests {
     unsafe impl Send for DnsStubClient {}
     unsafe impl Sync for DnsStubClient {}
 
+    #[async_trait]
     impl DnsClient for DnsStubClient {
         fn get_sent_count(&self) -> usize {
             0
@@ -356,7 +363,7 @@ pub mod tests {
             &self,
             qname: &str,
             qtype: QueryType,
-            server: (&str, u16),
+            server: (IpAddr, u16),
             recursive: bool,
         ) -> Result<DnsPacket> {
             (self.callback)(qname, qtype, server, recursive)
@@ -368,7 +375,12 @@ pub mod tests {
         let client = DnsNetworkClient::new(31456).await;
 
         let mut rx = client
-            .send_udp_query("google.com", QueryType::A, ("8.8.8.8", 53), true)
+            .send_udp_query(
+                "google.com",
+                QueryType::A,
+                (IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 53),
+                true,
+            )
             .await
             .unwrap();
 
@@ -396,7 +408,12 @@ pub mod tests {
     pub async fn test_tcp_client() {
         let client = DnsNetworkClient::new(31457).await;
         let res = client
-            .send_tcp_query("google.com", QueryType::A, ("8.8.8.8", 53), true)
+            .send_tcp_query(
+                "google.com",
+                QueryType::A,
+                (IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 53),
+                true,
+            )
             .await
             .unwrap();
 

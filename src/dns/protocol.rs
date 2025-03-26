@@ -1031,7 +1031,7 @@ impl DnsPacket {
     /// be any A records in the additional section, and we'll have to perform *another*
     /// lookup in the midst. For this, we introduce a method for returning the host
     /// name of an appropriate name server.
-    pub fn get_unresolved_ns<'a>(&'a self, qname: &'a str) -> Option<&'a str> {
+    pub fn get_unresolved_ns(&self, qname: &str) -> Option<String> {
         // Get an iterator over the nameservers in the authorities section
         let vec = self
             .get_ns(qname)
@@ -1041,7 +1041,7 @@ impl DnsPacket {
         if vec.is_empty() {
             None
         } else {
-            Some(vec.choose(&mut rand::rng()).unwrap())
+            Some(vec.choose(&mut rand::rng()).unwrap().to_string())
         }
     }
 }
