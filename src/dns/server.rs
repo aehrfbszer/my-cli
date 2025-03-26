@@ -186,6 +186,9 @@ impl DnsServer for DnsUdpServer {
     /// being called multiple times.
     async fn run_server(self) -> Result<()> {
         // Bind the socket
+
+        println!("Listening on UDP port {}", self.context.dns_port);
+
         let socket = Arc::new(UdpSocket::bind(("0.0.0.0", self.context.dns_port)).await?);
 
         // Spawn threads for handling requests
@@ -205,7 +208,10 @@ impl DnsServer for DnsUdpServer {
                     .and_then(|x| request_cond.wait(x).ok())
                     .and_then(|mut x| x.pop_front())
                 {
-                    Some(x) => x,
+                    Some(x) => {
+                        println!("Received query: {:?}", x.1);
+                        x
+                    }
                     None => {
                         println!("Not expected to happen!");
                         continue;

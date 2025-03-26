@@ -88,7 +88,7 @@ impl ServerContext {
         // Start UDP client thread
 
         // Load authority data
-        self.authority.load().await?;
+        // self.authority.load().await?;
 
         self.client.run().await?;
         Ok(())

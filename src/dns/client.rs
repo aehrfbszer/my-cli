@@ -235,7 +235,6 @@ impl DnsClient for DnsNetworkClient {
                             pending_queries.remove(*idx);
                         }
                     }
-                    println!("aaaaaaaaaaa");
 
                     sleep(Duration::from_millis(100)).await;
                 }
