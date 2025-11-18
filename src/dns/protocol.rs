@@ -345,8 +345,8 @@ impl DnsRecord {
                 buffer.write_u32(ttl)?;
                 buffer.write_u16(16)?;
 
-                for octet in &addr.segments() {
-                    buffer.write_u16(*octet)?;
+                for octet in addr.segments() {
+                    buffer.write_u16(octet)?;
                 }
             }
             DnsRecord::NS {
@@ -686,6 +686,7 @@ impl DnsHeader {
         Ok(())
     }
 
+    /// DNS报文头部固定12字节
     pub fn binary_len(&self) -> usize {
         12
     }

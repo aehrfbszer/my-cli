@@ -99,11 +99,8 @@ impl DomainEntry {
             ref mut records, ..
         }) = self.record_types.get_mut(&rec.get_querytype())
         {
-            if records.contains(&entry) {
-                records.remove(&entry);
-            }
+            records.replace(entry);
 
-            records.insert(entry);
             return;
         }
 
@@ -112,7 +109,7 @@ impl DomainEntry {
 
         let new_set = RecordSet::Records {
             qtype: rec.get_querytype(),
-            records: records,
+            records,
         };
 
         self.record_types.insert(rec.get_querytype(), new_set);
@@ -188,12 +185,10 @@ pub struct Cache {
 
 impl Cache {
     pub fn new() -> Cache {
-        Cache {
-            domain_entries: BTreeMap::new(),
-        }
+        Cache::default()
     }
 
-    fn get_cache_state(&mut self, qname: &str, qtype: QueryType) -> CacheState {
+    fn get_cache_state(&self, qname: &str, qtype: QueryType) -> CacheState {
         match self.domain_entries.get(qname) {
             Some(x) => x.get_cache_state(qtype),
             None => CacheState::NotCached,
@@ -250,7 +245,7 @@ impl Cache {
                     }
                 })
                 .or_insert_with(|| {
-                    let mut rs = DomainEntry::new(domain.clone());
+                    let mut rs = DomainEntry::new(domain);
                     rs.store_record(rec);
                     rs.into()
                 });

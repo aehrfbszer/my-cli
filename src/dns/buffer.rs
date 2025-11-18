@@ -226,6 +226,7 @@ impl PacketBuffer for VectorPacketBuffer {
 pub struct BytePacketBuffer {
     pub buf: [u8; 512],
     pub pos: usize,
+    pub label_lookup: BTreeMap<String, usize>,
 }
 
 impl BytePacketBuffer {
@@ -233,6 +234,7 @@ impl BytePacketBuffer {
         BytePacketBuffer {
             buf: [0; 512],
             pos: 0,
+            label_lookup: BTreeMap::new(),
         }
     }
 
@@ -306,12 +308,12 @@ impl PacketBuffer for BytePacketBuffer {
         Ok(())
     }
 
-    fn find_label(&self, _label: &str) -> Option<usize> {
-        None
+    fn find_label(&self, label: &str) -> Option<usize> {
+        self.label_lookup.get(label).cloned()
     }
 
-    fn save_label(&mut self, _label: &str, _pos: usize) {
-        // todo!()
+    fn save_label(&mut self, label: &str, pos: usize) {
+        self.label_lookup.insert(label.to_string(), pos);
     }
 }
 
@@ -323,17 +325,19 @@ where
     pub stream: &'a mut T,
     pub buffer: Vec<u8>,
     pub pos: usize,
+    pub label_lookup: BTreeMap<String, usize>,
 }
 
 impl<'a, T> StreamPacketBuffer<'a, T>
 where
     T: AsyncReadExt + 'a,
 {
-    pub fn new(stream: &mut T) -> StreamPacketBuffer<T> {
+    pub fn new(stream: &mut T) -> StreamPacketBuffer<'_, T> {
         StreamPacketBuffer {
             stream: stream,
             buffer: Vec::new(),
             pos: 0,
+            label_lookup: BTreeMap::new(),
         }
     }
 }
@@ -342,12 +346,12 @@ impl<'a, T> PacketBuffer for StreamPacketBuffer<'a, T>
 where
     T: AsyncReadExt + 'a + Unpin,
 {
-    fn find_label(&self, _: &str) -> Option<usize> {
-        None
+    fn find_label(&self, label: &str) -> Option<usize> {
+        self.label_lookup.get(label).cloned()
     }
 
-    fn save_label(&mut self, _: &str, _: usize) {
-        unimplemented!();
+    fn save_label(&mut self, label: &str, pos: usize) {
+        self.label_lookup.insert(label.to_string(), pos);
     }
 
     async fn read(&mut self) -> Result<u8> {
