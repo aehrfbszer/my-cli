@@ -94,11 +94,17 @@ impl DnsResolver for ForwardingDnsResolver {
 
     async fn perform(&mut self, qname: &str, qtype: QueryType) -> Result<DnsPacket> {
         let (host, port) = self.server;
+        println!("Forwarding query {:?} {} to {}:{}", qtype, qname, host, port);
         let result = self
             .context
             .client
             .send_query(qname, qtype, (host, port), true)
             .await?;
+
+        println!(
+            "Received forwarded response for {:?} {}: {:?}",
+            qtype, qname, result
+        );
 
         self.context.cache.store(&result.answers)?;
 

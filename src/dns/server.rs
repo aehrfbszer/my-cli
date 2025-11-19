@@ -1,9 +1,7 @@
 //! UDP and TCP server implementations for DNS
 
-use std::collections::VecDeque;
-use std::net::SocketAddr;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Condvar, Mutex};
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -79,7 +77,8 @@ async fn resolve_cnames(
                     let new_unmatched = result2.get_unresolved_cnames();
                     results.push(result2);
 
-                    resolve_cnames(&new_unmatched, results, resolver, depth + 1);
+                    let feature = resolve_cnames(&new_unmatched, results, resolver, depth + 1);
+                    Box::pin(feature).await;
                 }
             }
             _ => {}
@@ -109,6 +108,8 @@ pub async fn execute_query(context: Arc<ServerContext>, request: &DnsPacket) -> 
     } else {
         let mut results = Vec::new();
 
+        println!("Executing query: {:?}", request);
+
         let question = &request.questions[0];
         packet.questions.push(question.clone());
 
@@ -122,6 +123,10 @@ pub async fn execute_query(context: Arc<ServerContext>, request: &DnsPacket) -> 
             .await
         {
             Ok(result) => {
+                println!(
+                    "Successfully resolved {:?} {}: {:?}",
+                    question.qtype, question.name, result
+                );
                 let rescode = result.header.rescode;
 
                 let unmatched = result.get_unresolved_cnames();
@@ -165,17 +170,11 @@ pub async fn execute_query(context: Arc<ServerContext>, request: &DnsPacket) -> 
 /// a new thread is spawned to service the request asynchronously.
 pub struct DnsUdpServer {
     context: Arc<ServerContext>,
-    request_queue: Arc<Mutex<VecDeque<(SocketAddr, DnsPacket)>>>,
-    request_cond: Arc<Condvar>,
 }
 
 impl DnsUdpServer {
     pub fn new(context: Arc<ServerContext>) -> DnsUdpServer {
-        DnsUdpServer {
-            context: context,
-            request_queue: Arc::new(Mutex::new(VecDeque::new())),
-            request_cond: Arc::new(Condvar::new()),
-        }
+        DnsUdpServer { context: context }
     }
 }
 #[async_trait]
@@ -188,64 +187,7 @@ impl DnsServer for DnsUdpServer {
         // Bind the socket
 
         println!("Listening on UDP port {}", self.context.dns_port);
-
         let socket = Arc::new(UdpSocket::bind(("0.0.0.0", self.context.dns_port)).await?);
-
-        // Spawn threads for handling requests
-        let socket_clone = socket.clone();
-
-        let context = self.context.clone();
-        let request_cond = self.request_cond.clone();
-        let request_queue = self.request_queue.clone();
-
-        tokio::spawn(async move {
-            loop {
-                // Acquire lock, and wait on the condition until data is
-                // available. Then proceed with popping an entry of the queue.
-                let (src, request) = match request_queue
-                    .lock()
-                    .ok()
-                    .and_then(|x| request_cond.wait(x).ok())
-                    .and_then(|mut x| x.pop_front())
-                {
-                    Some(x) => {
-                        println!("Received query: {:?}", x.1);
-                        x
-                    }
-                    None => {
-                        println!("Not expected to happen!");
-                        continue;
-                    }
-                };
-
-                let mut size_limit = 512;
-
-                // Check for EDNS
-                if request.resources.len() == 1 {
-                    if let DnsRecord::OPT { packet_len, .. } = request.resources[0] {
-                        size_limit = packet_len as usize;
-                    }
-                }
-
-                // Create a response buffer, and ask the context for an appropriate
-                // resolver
-                let mut res_buffer = VectorPacketBuffer::new();
-
-                let mut packet = execute_query(context.clone(), &request).await;
-                let _ = packet.write(&mut res_buffer, size_limit);
-
-                // Fire off the response
-                let len = res_buffer.pos();
-                let data = return_or_report!(
-                    res_buffer.get_range(0, len).await,
-                    "Failed to get buffer data"
-                );
-                ignore_or_report!(
-                    socket_clone.send_to(data, src).await,
-                    "Failed to send response packet"
-                );
-            }
-        });
 
         tokio::spawn(async move {
             loop {
@@ -265,26 +207,43 @@ impl DnsServer for DnsUdpServer {
                     }
                 };
 
-                // Parse it
-                let request = match DnsPacket::from_buffer(&mut req_buffer).await {
-                    Ok(x) => x,
-                    Err(e) => {
-                        println!("Failed to parse UDP query packet: {:?}", e);
-                        continue;
-                    }
-                };
+                let ctx = self.context.clone();
+                // Spawn threads for handling requests
+                let socket_clone = socket.clone();
 
-                // Acquire lock, add request to queue, and notify waiting threads
-                // using the condition.
-                match self.request_queue.lock() {
-                    Ok(mut queue) => {
-                        queue.push_back((src, request));
-                        self.request_cond.notify_one();
+                tokio::spawn(async move {
+                    // Parse it
+                    if let Ok(request) = DnsPacket::from_buffer(&mut req_buffer).await {
+                        let mut size_limit = 512;
+
+                        // Check for EDNS
+                        if request.resources.len() == 1 {
+                            if let DnsRecord::OPT { packet_len, .. } = request.resources[0] {
+                                size_limit = packet_len as usize;
+                            }
+                        }
+
+                        // Create a response buffer, and ask the context for an appropriate
+                        // resolver
+                        let mut res_buffer = VectorPacketBuffer::new();
+
+                        let mut packet = execute_query(ctx, &request).await;
+                        let _ = packet.write(&mut res_buffer, size_limit);
+
+                        // Fire off the response
+                        let len = res_buffer.pos();
+                        let data = return_or_report!(
+                            res_buffer.get_range(0, len).await,
+                            "Failed to get buffer data"
+                        );
+                        ignore_or_report!(
+                            socket_clone.send_to(data, src).await,
+                            "Failed to send response packet"
+                        );
+                    } else {
+                        println!("Failed to parse UDP query packet");
                     }
-                    Err(e) => {
-                        println!("Failed to send UDP request for processing: {}", e);
-                    }
-                }
+                });
             }
         });
         Ok(())

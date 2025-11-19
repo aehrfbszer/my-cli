@@ -13,6 +13,7 @@ use thiserror::Error;
 use tokio::{
     io::AsyncWriteExt,
     net::{TcpStream, UdpSocket},
+    select,
     sync::mpsc::{Receiver, Sender, channel},
     time::interval,
 };
@@ -191,6 +192,11 @@ impl DnsNetworkClient {
         self.socket
             .send_to(&req_buffer.buf[0..req_buffer.pos], server)
             .await?;
+
+        println!(
+            "Sent UDP query {:?} {} to {}:{}. Seq: {}",
+            qtype, qname, server.0, server.1, packet.header.id
+        );
         // Wait for response
         Ok(rx)
     }
@@ -210,73 +216,73 @@ impl DnsClient for DnsNetworkClient {
     /// responses will ever be generated, and clients will just block indefinitely.
     async fn run(&self) -> Result<()> {
         // Start the thread for handling incoming responses
-        {
-            let pending_queries_lock = self.pending_queries.clone();
-
-            let mut interval = interval(Duration::from_millis(100));
-
-            tokio::spawn(async move {
-                let timeout = Duration::from_secs(1);
-                loop {
-                    interval.tick().await;
-
-                    if let Ok(mut pending_queries) = pending_queries_lock.lock() {
-                        pending_queries.retain(|pending_query| {
-                            let expires = pending_query.timestamp + timeout;
-                            if expires < Local::now() {
-                                let _ = pending_query.tx.send(None);
-                                false
-                            } else {
-                                true
-                            }
-                        });
-                    }
-                }
-            });
-        }
 
         let pending_queries_lock = self.pending_queries.clone();
         let socket_copy = self.socket.clone();
 
         let mut res_buffer = BytePacketBuffer::new();
-        loop {
-            if let Ok(_) = socket_copy.recv_from(&mut res_buffer.buf).await {
-                let _ = res_buffer.seek(0);
-                match DnsPacket::from_buffer(&mut res_buffer).await {
-                    Ok(packet) => {
-                        // Acquire a lock on the pending_queries list, and search for a
-                        // matching PendingQuery to which to deliver the response.
-                        if let Ok(mut pending_queries) = pending_queries_lock.lock() {
-                            let mut discarded = true;
 
-                            pending_queries.retain(|pending_query| {
-                                if pending_query.seq == packet.header.id {
-                                    // Matching query found, send the response
-                                    let _ = pending_query.tx.send(Some(packet.clone()));
-                                    discarded = true;
-                                    false
-                                } else {
-                                    true
+        let mut interval = interval(Duration::from_millis(100));
+        tokio::spawn(async move {
+            loop {
+                select! {
+                    _ = interval.tick()=>{
+                            let timeout = Duration::from_secs(5);
+                            if let Ok(mut pending_queries) = pending_queries_lock.lock() {
+                                pending_queries.retain(|pending_query| {
+                                    let expires = pending_query.timestamp + timeout;
+                                    if expires < Local::now() {
+                                        let _ = pending_query.tx.send(None);
+                                        println!("Query timed out: {}", pending_query.seq);
+                                        false
+                                    } else {
+                                        true
+                                    }
+                                });
+                            }
+                    }
+                    res = socket_copy.recv_from(&mut res_buffer.buf) =>{
+                        if let Ok(_) = res {
+                        let _ = res_buffer.seek(0);
+                        match DnsPacket::from_buffer(&mut res_buffer).await {
+                            Ok(packet) => {
+                                // Acquire a lock on the pending_queries list, and search for a
+                                // matching PendingQuery to which to deliver the response.
+                                    if let Ok(mut pending_queries) = pending_queries_lock.lock() {
+                                        let mut discarded = true;
+
+                                        pending_queries.retain(|pending_query| {
+                                            if pending_query.seq == packet.header.id {
+                                                // Matching query found, send the response
+                                                println!(
+                                                    "Received UDP response for {:?}",
+                                                    packet.answers
+                                                );
+                                                let _ = pending_query.tx.send(Some(packet.clone()));
+                                                discarded = false;
+                                                false
+                                            } else {
+                                                true
+                                            }
+                                        });
+                                        if discarded {
+                                            println!("Discarding response for: {:?}", packet.questions[0]);
+                                        }
+                                    }
                                 }
-                            });
-
-                            if discarded {
-                                println!("Discarding response for: {:?}", packet.questions[0]);
+                                Err(err) => {
+                                    println!(
+                                        "DnsNetworkClient failed to parse packet with error: {}",
+                                        err
+                                    );
+                                }
                             }
                         }
                     }
-                    Err(err) => {
-                        println!(
-                            "DnsNetworkClient failed to parse packet with error: {}",
-                            err
-                        );
-                        continue;
-                    }
                 }
             }
-        }
-
-        // Ok(())
+        });
+        Ok(())
     }
 
     async fn send_query(
@@ -300,6 +306,11 @@ impl DnsClient for DnsNetworkClient {
                 }
             }
         }
+
+        println!(
+            "Received UDP response for {:?} {}: {:?}",
+            qtype, qname, packet
+        );
 
         if let Ok(packet) = packet {
             if !packet.header.truncated_message {

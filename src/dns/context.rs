@@ -1,9 +1,9 @@
 //! The `ServerContext in this thread holds the common state across the server
 
-use std::net::IpAddr;
+use std::fs;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::{default, fs};
 
 use thiserror::Error;
 
@@ -68,7 +68,10 @@ impl ServerContext {
             client: Box::new(DnsNetworkClient::new(34255).await),
             dns_port: 5351,
             api_port: 5380,
-            resolve_strategy: ResolveStrategy::Recursive,
+            resolve_strategy: ResolveStrategy::Forward {
+                host: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+                port: 53,
+            },
             allow_recursive: true,
             enable_udp: true,
             enable_tcp: true,

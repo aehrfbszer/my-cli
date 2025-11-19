@@ -5,10 +5,12 @@ use dns::{
     protocol::{DnsRecord, TransientTtl},
     server::{DnsServer, DnsTcpServer, DnsUdpServer},
 };
+use tokio::time::interval;
 use std::{
     error::Error,
     net::{IpAddr, Ipv4Addr, UdpSocket},
     sync::Arc,
+    time::Duration,
 };
 
 mod dns;
@@ -43,23 +45,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
     let mut context = Arc::new(ServerContext::new().await);
 
-    // Start DNS servers
-    if context.enable_udp {
-        let udp_server = DnsUdpServer::new(context.clone());
-        if let Err(e) = udp_server.run_server().await {
-            println!("Failed to bind UDP listener: {:?}", e);
-        }
-    };
-
-    if context.enable_tcp {
-        let tcp_server = DnsTcpServer::new(context.clone());
-        if let Err(e) = tcp_server.run_server().await {
-            println!("Failed to bind TCP listener: {:?}", e);
-        }
-    };
-
-    println!("Listening on port {}", context.dns_port);
-
     if let Some(ctx) = Arc::get_mut(&mut context) {
         let mut index_rootservers = true;
         match args.forward.parse::<Ipv4Addr>().ok() {
@@ -84,7 +69,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         ctx.dns_port = args.port;
 
         match ctx.initialize().await {
-            Ok(_) => {}
+            Ok(_) => {
+                println!("Server initialized successfully");
+            }
             Err(e) => {
                 println!("Server failed to initialize: {:?}", e);
                 return Ok(());
@@ -96,7 +83,31 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     };
 
-    Ok(())
+    // Start DNS servers
+    if context.enable_udp {
+        let udp_server = DnsUdpServer::new(context.clone());
+        if let Err(e) = udp_server.run_server().await {
+            println!("Failed to bind UDP listener: {:?}", e);
+        }
+    };
+
+    if context.enable_tcp {
+        let tcp_server = DnsTcpServer::new(context.clone());
+        if let Err(e) = tcp_server.run_server().await {
+            println!("Failed to bind TCP listener: {:?}", e);
+        }
+    };
+
+    println!("Listening on port {}", context.dns_port);
+
+    let mut interval = interval(Duration::from_mins(10));
+
+    loop {
+        interval.tick().await;
+        println!("10 minutes passed");
+    }
+
+    // Ok(())
 }
 
 fn get_rootservers() -> Vec<DnsRecord> {
