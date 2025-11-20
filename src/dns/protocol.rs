@@ -476,7 +476,7 @@ impl DnsRecord {
             }
             DnsRecord::OPT { .. } => {}
             DnsRecord::UNKNOWN { .. } => {
-                println!("Skipping record: {:?}", self);
+                tracing::debug!(record = ?self, "Skipping record");
             }
         }
 
@@ -826,26 +826,26 @@ impl DnsPacket {
 
     #[allow(dead_code)]
     pub fn print(&self) {
-        println!("{}", self.header);
+        tracing::debug!(header = %self.header, "DnsPacket header");
 
-        println!("questions:");
+        tracing::debug!("questions:");
         for x in &self.questions {
-            println!("\t{:?}", x);
+            tracing::debug!(?x, "question");
         }
 
-        println!("answers:");
+        tracing::debug!("answers:");
         for x in &self.answers {
-            println!("\t{:?}", x);
+            tracing::debug!(?x, "answer");
         }
 
-        println!("authorities:");
+        tracing::debug!("authorities:");
         for x in &self.authorities {
-            println!("\t{:?}", x);
+            tracing::debug!(?x, "authority");
         }
 
-        println!("resources:");
+        tracing::debug!("resources:");
         for x in &self.resources {
-            println!("\t{:?}", x);
+            tracing::debug!(?x, "resource");
         }
     }
 

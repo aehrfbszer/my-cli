@@ -94,7 +94,7 @@ impl<'a> Zones {
                         zone.add_record(&rr);
                     }
 
-                    println!("Loaded zone {} with {} records", zone.domain, record_count);
+                    tracing::info!(zone = %zone.domain, record_count = record_count, "Loaded zone");
 
                     self.zones.insert(zone.domain.clone(), zone);
                 };
@@ -110,8 +110,8 @@ impl<'a> Zones {
             let filename = zones_dir.join(Path::new(&zone.domain));
             let mut zone_file = match File::create(&filename).await {
                 Ok(x) => x,
-                Err(_) => {
-                    println!("Failed to save file {:?}", filename);
+                Err(e) => {
+                    tracing::warn!(?filename, error = %e, "Failed to save zone file");
                     continue;
                 }
             };

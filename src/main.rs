@@ -27,12 +27,25 @@ struct Args {
 
     #[arg(short, long, default_value_t = 5353)]
     port: u16,
+    /// Log level (error, warn, info, debug, trace)
+    #[arg(long, default_value_t = String::from("info"))]
+    log_level: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // Initialize tracing for structured logging
-    tracing_subscriber::fmt::init();
+    // parse args first so we can configure tracing from CLI
+    let args = Args::parse();
+
+    // Initialize tracing for structured logging based on CLI log level
+    let level = match args.log_level.to_lowercase().as_str() {
+        "error" => tracing::Level::ERROR,
+        "warn" | "warning" => tracing::Level::WARN,
+        "debug" => tracing::Level::DEBUG,
+        "trace" => tracing::Level::TRACE,
+        _ => tracing::Level::INFO,
+    };
+    tracing_subscriber::fmt().with_max_level(level).init();
 
     info!("Starting my-cli");
 
@@ -45,7 +58,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     //     }
     // }
 
-    let args = Args::parse();
     let mut context = Arc::new(ServerContext::new().await);
 
     if let Some(ctx) = Arc::get_mut(&mut context) {

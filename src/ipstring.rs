@@ -62,7 +62,7 @@ pub fn ip_to_buffer(ip: &str, buff: Option<Vec<u8>>, offset: usize) -> Vec<u8> {
                 buffer[offset + i * 2 + 1] = byte as u8;
             }
         }
-        println!("{:?}", buffer);
+        tracing::debug!(?buffer, "ip buffer intermediate");
         if let Some(index) = zero_index {
             let insert_index = index * 2;
             let data_len = octets.len() * 2;
@@ -72,7 +72,7 @@ pub fn ip_to_buffer(ip: &str, buff: Option<Vec<u8>>, offset: usize) -> Vec<u8> {
             let center_drop_part: Vec<_> = buffer
                 .splice(insert_index..insert_index + 2, zeros)
                 .collect();
-            println!("drop: {:?}  {:?}", drop_part, center_drop_part);
+            tracing::debug!(?drop_part, ?center_drop_part, "ipv6 zero-compression drop parts");
             buffer.extend(other_part);
         }
     }
@@ -179,9 +179,9 @@ mod tests {
         let ip = "192.168.1.1";
         let ip6 = "2001:0db8:85a3::8a2e:0370:7334";
         let buffer = ip_to_buffer(ip, None, 0);
-        println!("{:?}  ipv4", buffer); // 输出结果
+        tracing::debug!(?buffer, "ipv4 buffer"); // 输出结果
         let buffer = ip_to_buffer(ip6, None, 0);
-        println!("{:0>2x?}  ipv6", buffer);
+        tracing::debug!(ipv6 = %format!("{:0>2x?}", buffer), "ipv6 buffer hex");
         let vv6 = buffer
             .chunks(2)
             .map(|s| {
@@ -190,6 +190,6 @@ mod tests {
             })
             .collect::<Vec<String>>();
 
-        println!("IP v 6：{}", vv6.join(":"));
+        tracing::debug!(ip_v6 = %vv6.join(":"), "IP v6 output");
     }
 }

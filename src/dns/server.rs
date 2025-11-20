@@ -8,7 +8,7 @@ use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::Semaphore;
-use tracing::{info, error, warn, debug};
+use tracing::{debug, error, info, warn};
 
 use crate::dns::buffer::{BytePacketBuffer, PacketBuffer, StreamPacketBuffer, VectorPacketBuffer};
 use crate::dns::context::ServerContext;
@@ -112,6 +112,7 @@ pub async fn execute_query(context: Arc<ServerContext>, request: &DnsPacket) -> 
 
         let question = &request.questions[0];
         packet.questions.push(question.clone());
+        info!(domain = %question.name, "Processing question");
 
         let mut resolver = context.create_resolver(context.clone());
         let rescode = match resolver
@@ -123,7 +124,9 @@ pub async fn execute_query(context: Arc<ServerContext>, request: &DnsPacket) -> 
             .await
         {
             Ok(result) => {
-                info!(qtype = ?question.qtype, qname = %question.name, result = ?result, "Successfully resolved");
+                debug!(qtype = ?question.qtype, qname = %question.name, result = ?result, "Successfully resolved");
+
+                info!(qtype = ?question.qtype, qname = %question.name, "Successfully resolved");
                 let rescode = result.header.rescode;
 
                 let unmatched = result.get_unresolved_cnames();
@@ -330,7 +333,10 @@ impl DnsServer for DnsTcpServer {
                 tokio::spawn(async move {
                     // hold permit for duration of task
                     let _permit = permit;
-                    let _ = ctx.statistics.tcp_query_count.fetch_add(1, Ordering::Release);
+                    let _ = ctx
+                        .statistics
+                        .tcp_query_count
+                        .fetch_add(1, Ordering::Release);
                     handle_tcp_stream(ctx, stream).await;
                 });
             }

@@ -65,7 +65,7 @@ pub async fn handle_query(socket: &UdpSocket) -> Result<()> {
 
     // In the normal case, exactly one question is present
     if let Some(question) = request.questions.pop() {
-        println!("Received query: {:?}", question);
+        tracing::info!(?question, "Received query");
 
         // Since all is set up and as expected, the query can be forwarded to the
         // target server. There's always the possibility that the query will
@@ -77,15 +77,15 @@ pub async fn handle_query(socket: &UdpSocket) -> Result<()> {
             packet.header.rescode = result.header.rescode;
 
             for rec in result.answers {
-                println!("Answer: {:?}", rec);
+                tracing::debug!(?rec, "Answer");
                 packet.answers.push(rec);
             }
             for rec in result.authorities {
-                println!("Authority: {:?}", rec);
+                tracing::debug!(?rec, "Authority");
                 packet.authorities.push(rec);
             }
             for rec in result.resources {
-                println!("Resource: {:?}", rec);
+                tracing::debug!(?rec, "Resource");
                 packet.resources.push(rec);
             }
         } else {
@@ -114,11 +114,11 @@ pub async fn recursive_lookup(qname: &str, qtype: QueryType) -> Result<DnsPacket
     // For now we're always starting with *a.root-servers.net*.
     let mut ns = IpAddr::V4(Ipv4Addr::new(198, 41, 0, 4));
 
-    println!("starting lookup of {:?} {} {:?}", qtype, qname, ns);
+    tracing::debug!(?qtype, qname = %qname, ns = %ns, "starting lookup");
 
     // Since it might take an arbitrary number of steps, we enter an unbounded loop.
     loop {
-        println!("attempting lookup of {:?} {} with ns {}", qtype, qname, ns);
+        tracing::debug!(?qtype, qname = %qname, ns = %ns, "attempting lookup");
 
         // The next step is to send the query to the active server.
         let ns_copy = ns;

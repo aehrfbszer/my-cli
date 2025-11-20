@@ -94,17 +94,14 @@ impl DnsResolver for ForwardingDnsResolver {
 
     async fn perform(&mut self, qname: &str, qtype: QueryType) -> Result<DnsPacket> {
         let (host, port) = self.server;
-        println!("Forwarding query {:?} {} to {}:{}", qtype, qname, host, port);
+        tracing::debug!(?qtype, qname = %qname, host = %host, port = %port, "Forwarding query to upstream");
         let result = self
             .context
             .client
             .send_query(qname, qtype, (host, port), true)
             .await?;
 
-        println!(
-            "Received forwarded response for {:?} {}: {:?}",
-            qtype, qname, result
-        );
+        tracing::debug!(?qtype, qname = %qname, result = ?result, "Received forwarded response");
 
         self.context.cache.store(&result.answers)?;
 
@@ -161,7 +158,7 @@ impl DnsResolver for RecursiveDnsResolver {
 
         // Start querying name servers
         loop {
-            println!("attempting lookup of {:?} {} with ns {}", qtype, qname, ns);
+            tracing::debug!(?qtype, qname = %qname, ns = %ns, "attempting lookup with nameserver");
 
             let ns_copy = ns.clone();
 
