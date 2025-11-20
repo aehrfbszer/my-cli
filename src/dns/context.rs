@@ -65,7 +65,7 @@ impl ServerContext {
         ServerContext {
             authority: Authority::new(),
             cache: SynchronizedCache::new(),
-            client: Box::new(DnsNetworkClient::new(34255).await),
+            client: Box::new(DnsNetworkClient::new(0).await),
             dns_port: 5351,
             api_port: 5380,
             resolve_strategy: ResolveStrategy::Forward {
