@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::mpsc::{Sender, channel};
+use tokio::sync::Semaphore;
 
 use crate::dns::buffer::{BytePacketBuffer, PacketBuffer, StreamPacketBuffer, VectorPacketBuffer};
 use crate::dns::context::ServerContext;
@@ -89,7 +89,6 @@ async fn resolve_cnames(
 /// Perform the actual work for a query
 ///
 /// Incoming requests are validated to make sure they are well formed and adhere
-/// to the server configuration. If so, the request will be passed on to the
 /// active resolver and a query will be performed. It will also resolve some
 /// possible references within the query, such as CNAME hosts.
 ///
@@ -253,89 +252,91 @@ impl DnsServer for DnsUdpServer {
 /// TCP DNS server
 pub struct DnsTcpServer {
     context: Arc<ServerContext>,
-    sender: Option<Sender<TcpStream>>,
 }
 
 impl DnsTcpServer {
     pub fn new(context: Arc<ServerContext>) -> DnsTcpServer {
-        DnsTcpServer {
-            context: context,
-            sender: None,
-        }
+        DnsTcpServer { context }
     }
 }
+
+async fn handle_tcp_stream(context: Arc<ServerContext>, mut stream: TcpStream) {
+    // Read and parse
+    if read_packet_length(&mut stream).await.is_err() {
+        println!("Failed to read query packet length");
+        return;
+    }
+
+    let request = {
+        let mut stream_buffer = StreamPacketBuffer::new(&mut stream);
+        match DnsPacket::from_buffer(&mut stream_buffer).await {
+            Ok(pkt) => pkt,
+            Err(_) => {
+                println!("Failed to read query packet");
+                return;
+            }
+        }
+    };
+
+    let mut res_buffer = VectorPacketBuffer::new();
+
+    let mut packet = execute_query(context.clone(), &request).await;
+    if packet.write(&mut res_buffer, 0xFFFF).is_err() {
+        println!("Failed to write packet to buffer");
+        return;
+    }
+
+    let len = res_buffer.pos();
+    if write_packet_length(&mut stream, len).await.is_err() {
+        println!("Failed to write packet size");
+        return;
+    }
+
+    let data = match res_buffer.get_range(0, len).await {
+        Ok(d) => d,
+        Err(_) => {
+            println!("Failed to get packet data");
+            return;
+        }
+    };
+
+    if stream.write(data).await.is_err() {
+        println!("Failed to write response packet");
+    }
+
+    let _ = stream.shutdown().await;
+}
+
 #[async_trait]
 impl DnsServer for DnsTcpServer {
-    async fn run_server(mut self) -> Result<()> {
+    async fn run_server(self) -> Result<()> {
         let listener = TcpListener::bind(format!("0.0.0.0:{}", self.context.dns_port)).await?;
 
-        // Spawn threads for handling requests, and create the channels
-        let (tx, mut rx) = channel(100);
-        self.sender = Some(tx);
+        println!("Listening on TCP port {}", self.context.dns_port);
 
+        // Limit concurrent handlers to avoid resource exhaustion
+        let sem = Arc::new(Semaphore::new(100usize));
         let context = self.context.clone();
 
         tokio::spawn(async move {
-            while let Some(mut stream) = rx.recv().await {
-                let _ = context
-                    .statistics
-                    .tcp_query_count
-                    .fetch_add(1, Ordering::Release);
-
-                // When DNS packets are sent over TCP, they're prefixed with a two byte
-                // length. We don't really need to know the length in advance, so we
-                // just move past it and continue reading as usual
-                ignore_or_report!(
-                    read_packet_length(&mut stream).await,
-                    "Failed to read query packet length"
-                );
-
-                let request = {
-                    let mut stream_buffer = StreamPacketBuffer::new(&mut stream);
-                    return_or_report!(
-                        DnsPacket::from_buffer(&mut stream_buffer).await,
-                        "Failed to read query packet"
-                    )
+            loop {
+                let (stream, _) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        println!("Failed to accept TCP connection: {:?}", e);
+                        continue;
+                    }
                 };
 
-                let mut res_buffer = VectorPacketBuffer::new();
+                let permit = sem.clone().acquire_owned().await.unwrap();
+                let ctx = context.clone();
 
-                let mut packet = execute_query(context.clone(), &request).await;
-                ignore_or_report!(
-                    packet.write(&mut res_buffer, 0xFFFF),
-                    "Failed to write packet to buffer"
-                );
-
-                // As is the case for incoming queries, we need to send a 2 byte length
-                // value before handing of the actual packet.
-                let len = res_buffer.pos();
-                ignore_or_report!(
-                    write_packet_length(&mut stream, len).await,
-                    "Failed to write packet size"
-                );
-
-                // Now we can go ahead and write the actual packet
-                let data = return_or_report!(
-                    res_buffer.get_range(0, len).await,
-                    "Failed to get packet data"
-                );
-
-                ignore_or_report!(stream.write(data).await, "Failed to write response packet");
-
-                ignore_or_report!(stream.shutdown().await, "Failed to shutdown socket");
-            }
-        });
-
-        tokio::spawn(async move {
-            loop {
-                let (stream, _) = listener.accept().await.unwrap();
-                // Hand it off to a worker thread
-                if let Some(ref tx) = self.sender {
-                    let tx1 = tx.clone();
-                    tokio::spawn(async move {
-                        let _ = tx1.send(stream).await;
-                    });
-                }
+                tokio::spawn(async move {
+                    // hold permit for duration of task
+                    let _permit = permit;
+                    let _ = ctx.statistics.tcp_query_count.fetch_add(1, Ordering::Release);
+                    handle_tcp_stream(ctx, stream).await;
+                });
             }
         });
 
