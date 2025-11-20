@@ -56,6 +56,8 @@ pub struct ServerContext {
     pub enable_udp: bool,
     pub enable_tcp: bool,
     pub enable_api: bool,
+    /// Maximum concurrent TCP handlers
+    pub tcp_concurrency_limit: usize,
     pub statistics: ServerStatistics,
     pub zones_dir: &'static str,
 }
@@ -75,6 +77,7 @@ impl ServerContext {
             allow_recursive: true,
             enable_udp: true,
             enable_tcp: true,
+            tcp_concurrency_limit: 100,
             enable_api: true,
             statistics: ServerStatistics {
                 tcp_query_count: AtomicUsize::new(0),
@@ -131,6 +134,7 @@ pub mod tests {
             allow_recursive: true,
             enable_udp: true,
             enable_tcp: true,
+            tcp_concurrency_limit: 4,
             enable_api: true,
             statistics: ServerStatistics {
                 tcp_query_count: AtomicUsize::new(0),

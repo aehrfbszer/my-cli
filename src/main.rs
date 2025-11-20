@@ -6,6 +6,7 @@ use dns::{
     server::{DnsServer, DnsTcpServer, DnsUdpServer},
 };
 use tokio::time::interval;
+use tracing::{info, error, warn, debug};
 use std::{
     error::Error,
     net::{IpAddr, Ipv4Addr, UdpSocket},
@@ -30,8 +31,10 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    println!("Hello, world!");
-    println!("Hello, world!");
+    // Initialize tracing for structured logging
+    tracing_subscriber::fmt::init();
+
+    info!("Starting my-cli");
 
     // let socket = UdpSocket::bind(("0.0.0.0", 2053))?;
 
@@ -48,16 +51,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if let Some(ctx) = Arc::get_mut(&mut context) {
         let mut index_rootservers = true;
         match args.forward.parse::<Ipv4Addr>().ok() {
-            Some(ip) => {
+                Some(ip) => {
                 ctx.resolve_strategy = ResolveStrategy::Forward {
                     host: IpAddr::V4(ip),
                     port: 53,
                 };
                 index_rootservers = false;
-                println!("Running as forwarder");
+                    info!(%ip, "Running as forwarder");
             }
             None => {
-                println!("Forward parameter must be a valid Ipv4 address");
+                    error!("Forward parameter must be a valid Ipv4 address");
                 return Ok(());
             }
         }
@@ -70,10 +73,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         match ctx.initialize().await {
             Ok(_) => {
-                println!("Server initialized successfully");
+                info!("Server initialized successfully");
             }
             Err(e) => {
-                println!("Server failed to initialize: {:?}", e);
+                error!(?e, "Server failed to initialize");
                 return Ok(());
             }
         }
@@ -87,24 +90,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if context.enable_udp {
         let udp_server = DnsUdpServer::new(context.clone());
         if let Err(e) = udp_server.run_server().await {
-            println!("Failed to bind UDP listener: {:?}", e);
+            error!(?e, "Failed to bind UDP listener");
         }
     };
 
     if context.enable_tcp {
         let tcp_server = DnsTcpServer::new(context.clone());
         if let Err(e) = tcp_server.run_server().await {
-            println!("Failed to bind TCP listener: {:?}", e);
+            error!(?e, "Failed to bind TCP listener");
         }
     };
 
-    println!("Listening on port {}", context.dns_port);
+    info!(port = context.dns_port, "Listening on port");
 
     let mut interval = interval(Duration::from_mins(10));
 
     loop {
         interval.tick().await;
-        println!("10 minutes passed");
+        debug!("10 minutes passed");
     }
 
     // Ok(())

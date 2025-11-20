@@ -8,6 +8,7 @@ use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::Semaphore;
+use tracing::{info, error, warn, debug};
 
 use crate::dns::buffer::{BytePacketBuffer, PacketBuffer, StreamPacketBuffer, VectorPacketBuffer};
 use crate::dns::context::ServerContext;
@@ -28,7 +29,7 @@ macro_rules! return_or_report {
         match $x {
             Ok(res) => res,
             Err(_) => {
-                println!($message);
+                error!("{}", $message);
                 return;
             }
         }
@@ -40,7 +41,7 @@ macro_rules! ignore_or_report {
         match $x {
             Ok(_) => {}
             Err(_) => {
-                println!($message);
+                error!("{}", $message);
                 return;
             }
         };
@@ -107,7 +108,7 @@ pub async fn execute_query(context: Arc<ServerContext>, request: &DnsPacket) -> 
     } else {
         let mut results = Vec::new();
 
-        println!("Executing query: {:?}", request);
+        debug!("Executing query: {:?}", request);
 
         let question = &request.questions[0];
         packet.questions.push(question.clone());
@@ -122,10 +123,7 @@ pub async fn execute_query(context: Arc<ServerContext>, request: &DnsPacket) -> 
             .await
         {
             Ok(result) => {
-                println!(
-                    "Successfully resolved {:?} {}: {:?}",
-                    question.qtype, question.name, result
-                );
+                info!(qtype = ?question.qtype, qname = %question.name, result = ?result, "Successfully resolved");
                 let rescode = result.header.rescode;
 
                 let unmatched = result.get_unresolved_cnames();
@@ -136,10 +134,7 @@ pub async fn execute_query(context: Arc<ServerContext>, request: &DnsPacket) -> 
                 rescode
             }
             Err(err) => {
-                println!(
-                    "Failed to resolve {:?} {}: {:?}",
-                    question.qtype, question.name, err
-                );
+                warn!(qtype = ?question.qtype, qname = %question.name, error = ?err, "Failed to resolve");
                 ResultCode::SERVFAIL
             }
         };
@@ -185,7 +180,7 @@ impl DnsServer for DnsUdpServer {
     async fn run_server(self) -> Result<()> {
         // Bind the socket
 
-        println!("Listening on UDP port {}", self.context.dns_port);
+        info!(port = self.context.dns_port, "Listening on UDP port");
         let socket = Arc::new(UdpSocket::bind(("0.0.0.0", self.context.dns_port)).await?);
 
         tokio::spawn(async move {
@@ -201,7 +196,7 @@ impl DnsServer for DnsUdpServer {
                 let (_, src) = match socket.recv_from(&mut req_buffer.buf).await {
                     Ok(x) => x,
                     Err(e) => {
-                        println!("Failed to read from UDP socket: {:?}", e);
+                        error!(?e, "Failed to read from UDP socket");
                         continue;
                     }
                 };
@@ -240,7 +235,7 @@ impl DnsServer for DnsUdpServer {
                             "Failed to send response packet"
                         );
                     } else {
-                        println!("Failed to parse UDP query packet");
+                        warn!("Failed to parse UDP query packet");
                     }
                 });
             }
@@ -263,7 +258,7 @@ impl DnsTcpServer {
 async fn handle_tcp_stream(context: Arc<ServerContext>, mut stream: TcpStream) {
     // Read and parse
     if read_packet_length(&mut stream).await.is_err() {
-        println!("Failed to read query packet length");
+        error!("Failed to read query packet length");
         return;
     }
 
@@ -272,7 +267,7 @@ async fn handle_tcp_stream(context: Arc<ServerContext>, mut stream: TcpStream) {
         match DnsPacket::from_buffer(&mut stream_buffer).await {
             Ok(pkt) => pkt,
             Err(_) => {
-                println!("Failed to read query packet");
+                error!("Failed to read query packet");
                 return;
             }
         }
@@ -282,26 +277,26 @@ async fn handle_tcp_stream(context: Arc<ServerContext>, mut stream: TcpStream) {
 
     let mut packet = execute_query(context.clone(), &request).await;
     if packet.write(&mut res_buffer, 0xFFFF).is_err() {
-        println!("Failed to write packet to buffer");
+        error!("Failed to write packet to buffer");
         return;
     }
 
     let len = res_buffer.pos();
     if write_packet_length(&mut stream, len).await.is_err() {
-        println!("Failed to write packet size");
+        error!("Failed to write packet size");
         return;
     }
 
     let data = match res_buffer.get_range(0, len).await {
         Ok(d) => d,
         Err(_) => {
-            println!("Failed to get packet data");
+            error!("Failed to get packet data");
             return;
         }
     };
 
     if stream.write(data).await.is_err() {
-        println!("Failed to write response packet");
+        error!("Failed to write response packet");
     }
 
     let _ = stream.shutdown().await;
@@ -312,10 +307,11 @@ impl DnsServer for DnsTcpServer {
     async fn run_server(self) -> Result<()> {
         let listener = TcpListener::bind(format!("0.0.0.0:{}", self.context.dns_port)).await?;
 
-        println!("Listening on TCP port {}", self.context.dns_port);
+        info!(port = self.context.dns_port, "Listening on TCP port");
 
-        // Limit concurrent handlers to avoid resource exhaustion
-        let sem = Arc::new(Semaphore::new(100usize));
+        // Limit concurrent handlers to avoid resource exhaustion (configurable)
+        let limit = self.context.tcp_concurrency_limit;
+        let sem = Arc::new(Semaphore::new(limit));
         let context = self.context.clone();
 
         tokio::spawn(async move {
@@ -323,7 +319,7 @@ impl DnsServer for DnsTcpServer {
                 let (stream, _) = match listener.accept().await {
                     Ok(s) => s,
                     Err(e) => {
-                        println!("Failed to accept TCP connection: {:?}", e);
+                        error!(?e, "Failed to accept TCP connection");
                         continue;
                     }
                 };

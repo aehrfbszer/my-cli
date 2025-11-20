@@ -18,6 +18,7 @@ use tokio::{
     sync::{oneshot},
     time::interval,
 };
+use tracing::{debug, info, warn, error};
 
 use super::{
     buffer::{
@@ -192,10 +193,7 @@ impl DnsNetworkClient {
             .send_to(&req_buffer.buf[0..req_buffer.pos], server)
             .await?;
 
-        println!(
-            "Sent UDP query {:?} {} to {}:{}. Seq: {}",
-            qtype, qname, server.0, server.1, packet.header.id
-        );
+        debug!(qtype = ?qtype, qname = %qname, server = %server.0, port = server.1, seq = packet.header.id, "Sent UDP query");
         // Wait for response
         Ok(rx)
     }
@@ -233,12 +231,12 @@ impl DnsClient for DnsNetworkClient {
                                     expired.push(*id);
                                 }
                             }
-                            for id in expired {
-                                if let Some(entry) = pending_queries.remove(&id) {
-                                    let _ = entry.tx.send(None);
-                                    println!("Query timed out: {}", id);
+                                for id in expired {
+                                    if let Some(entry) = pending_queries.remove(&id) {
+                                        let _ = entry.tx.send(None);
+                                        warn!(id = id, "Query timed out");
+                                    }
                                 }
-                            }
                         }
                     }
                     res = socket_copy.recv_from(&mut res_buffer.buf) => {
@@ -248,15 +246,15 @@ impl DnsClient for DnsNetworkClient {
                                 Ok(packet) => {
                                     if let Ok(mut pending_queries) = pending_queries_lock.lock() {
                                         if let Some(entry) = pending_queries.remove(&packet.header.id) {
-                                            println!("Received UDP answers for {:?}", packet.answers);
+                                            debug!(answers = ?packet.answers, "Received UDP answers");
                                             let _ = entry.tx.send(Some(packet.clone()));
                                         } else {
-                                            println!("Discarding response for: {:?}", packet.questions[0]);
+                                            debug!(question = ?packet.questions[0], "Discarding response");
                                         }
                                     }
                                 }
                                 Err(err) => {
-                                    println!("DnsNetworkClient failed to parse packet with error: {}", err);
+                                    error!(?err, "DnsNetworkClient failed to parse packet");
                                 }
                             }
                         }
@@ -295,7 +293,7 @@ impl DnsClient for DnsNetworkClient {
         }
 
         // If we reached here, the UDP response was truncated; retry over TCP
-        println!("Truncated response - resending as TCP");
+        info!("Truncated response - resending as TCP");
         self.send_tcp_query(qname, qtype, server, recursive).await
     }
 }
