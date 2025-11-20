@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     net::{IpAddr, Ipv4Addr},
     sync::{
         Arc, Mutex,
@@ -14,7 +15,7 @@ use tokio::{
     io::AsyncWriteExt,
     net::{TcpStream, UdpSocket},
     select,
-    sync::mpsc::{Receiver, Sender, channel},
+    sync::{oneshot},
     time::interval,
 };
 
@@ -74,18 +75,14 @@ pub struct DnsNetworkClient {
     /// The listener socket
     socket: Arc<UdpSocket>,
 
-    /// Queries in progress
-    pending_queries: Arc<Mutex<Vec<PendingQuery>>>,
+    /// Queries in progress (map from seq id -> oneshot sender)
+        pending_queries: Arc<Mutex<HashMap<u16, PendingEntry>>>,
 }
 
-/// A query in progress. This struct holds the `id` if the request, and a channel
-/// endpoint for returning a response back to the thread from which the query
-/// was posed.
-struct PendingQuery {
-    seq: u16,
-    timestamp: DateTime<Local>,
-    tx: Sender<Option<DnsPacket>>,
-}
+    struct PendingEntry {
+        timestamp: DateTime<Local>,
+        tx: oneshot::Sender<Option<DnsPacket>>,
+    }
 
 impl DnsNetworkClient {
     pub async fn new(port: u16) -> DnsNetworkClient {
@@ -98,7 +95,7 @@ impl DnsNetworkClient {
                     .await
                     .unwrap(),
             ),
-            pending_queries: Arc::new(Mutex::new(Vec::new())),
+            pending_queries: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -156,7 +153,7 @@ impl DnsNetworkClient {
         qtype: QueryType,
         server: (IpAddr, u16),
         recursive: bool,
-    ) -> Result<Receiver<Option<DnsPacket>>> {
+    ) -> Result<oneshot::Receiver<Option<DnsPacket>>> {
         let _ = self.total_sent.fetch_add(1, Ordering::Release);
 
         // Prepare request
@@ -171,19 +168,21 @@ impl DnsNetworkClient {
             .questions
             .push(DnsQuestion::new(qname.to_string(), qtype));
 
-        // Create a return channel, and add a `PendingQuery` to the list of lookups
-        // in progress
-        let (tx, rx) = channel(100);
+        // Create a oneshot return channel, and add an entry to the map of lookups
+        // in progress keyed by packet id
+        let (tx, rx) = oneshot::channel::<Option<DnsPacket>>();
         {
             let mut pending_queries = self
                 .pending_queries
                 .lock()
                 .map_err(|_| ClientError::PoisonedLock)?;
-            pending_queries.push(PendingQuery {
-                seq: packet.header.id,
-                timestamp: Local::now(),
-                tx,
-            });
+            pending_queries.insert(
+                packet.header.id,
+                PendingEntry {
+                    timestamp: Local::now(),
+                    tx,
+                },
+            );
         }
 
         // Send query
@@ -215,8 +214,6 @@ impl DnsClient for DnsNetworkClient {
     /// The run method launches a worker thread. Unless this thread is running, no
     /// responses will ever be generated, and clients will just block indefinitely.
     async fn run(&self) -> Result<()> {
-        // Start the thread for handling incoming responses
-
         let pending_queries_lock = self.pending_queries.clone();
         let socket_copy = self.socket.clone();
 
@@ -226,55 +223,40 @@ impl DnsClient for DnsNetworkClient {
         tokio::spawn(async move {
             loop {
                 select! {
-                    _ = interval.tick()=>{
-                            let timeout = Duration::from_secs(5);
-                            if let Ok(mut pending_queries) = pending_queries_lock.lock() {
-                                pending_queries.retain(|pending_query| {
-                                    let expires = pending_query.timestamp + timeout;
-                                    if expires < Local::now() {
-                                        let _ = pending_query.tx.send(None);
-                                        println!("Query timed out: {}", pending_query.seq);
-                                        false
-                                    } else {
-                                        true
-                                    }
-                                });
+                    _ = interval.tick() => {
+                        let timeout = Duration::from_secs(5);
+                        if let Ok(mut pending_queries) = pending_queries_lock.lock() {
+                            let mut expired: Vec<u16> = Vec::new();
+                            for (id, entry) in pending_queries.iter() {
+                                let expires = entry.timestamp + timeout;
+                                if expires < Local::now() {
+                                    expired.push(*id);
+                                }
                             }
+                            for id in expired {
+                                if let Some(entry) = pending_queries.remove(&id) {
+                                    let _ = entry.tx.send(None);
+                                    println!("Query timed out: {}", id);
+                                }
+                            }
+                        }
                     }
-                    res = socket_copy.recv_from(&mut res_buffer.buf) =>{
-                        if let Ok(_) = res {
-                        let _ = res_buffer.seek(0);
-                        match DnsPacket::from_buffer(&mut res_buffer).await {
-                            Ok(packet) => {
-                                // Acquire a lock on the pending_queries list, and search for a
-                                // matching PendingQuery to which to deliver the response.
+                    res = socket_copy.recv_from(&mut res_buffer.buf) => {
+                        if let Ok((_, _)) = res {
+                            let _ = res_buffer.seek(0);
+                            match DnsPacket::from_buffer(&mut res_buffer).await {
+                                Ok(packet) => {
                                     if let Ok(mut pending_queries) = pending_queries_lock.lock() {
-                                        let mut discarded = true;
-
-                                        pending_queries.retain(|pending_query| {
-                                            if pending_query.seq == packet.header.id {
-                                                // Matching query found, send the response
-                                                println!(
-                                                    "Received UDP response for {:?}",
-                                                    packet.answers
-                                                );
-                                                let _ = pending_query.tx.send(Some(packet.clone()));
-                                                discarded = false;
-                                                false
-                                            } else {
-                                                true
-                                            }
-                                        });
-                                        if discarded {
+                                        if let Some(entry) = pending_queries.remove(&packet.header.id) {
+                                            println!("Received UDP answers for {:?}", packet.answers);
+                                            let _ = entry.tx.send(Some(packet.clone()));
+                                        } else {
                                             println!("Discarding response for: {:?}", packet.questions[0]);
                                         }
                                     }
                                 }
                                 Err(err) => {
-                                    println!(
-                                        "DnsNetworkClient failed to parse packet with error: {}",
-                                        err
-                                    );
+                                    println!("DnsNetworkClient failed to parse packet with error: {}", err);
                                 }
                             }
                         }
@@ -292,34 +274,27 @@ impl DnsClient for DnsNetworkClient {
         server: (IpAddr, u16),
         recursive: bool,
     ) -> Result<DnsPacket> {
-        let mut rx = self.send_udp_query(qname, qtype, server, recursive).await?;
+        let rx = self.send_udp_query(qname, qtype, server, recursive).await?;
 
-        let mut packet: Result<DnsPacket> = Err(ClientError::LookupFailed);
-        while let Some(rr) = rx.recv().await {
-            match rr {
-                Some(qr) => {
-                    packet = Ok(qr);
+        // Wait for the oneshot response
+        match rx.await {
+            Ok(Some(packet)) => {
+                // got a packet
+                if !packet.header.truncated_message {
+                    return Ok(packet);
                 }
-                None => {
-                    self.total_failed.fetch_add(1, Ordering::Release);
-                    packet = Err(ClientError::TimeOut);
-                }
+                // otherwise fallthrough to TCP retry
+            }
+            Ok(None) => {
+                self.total_failed.fetch_add(1, Ordering::Release);
+                return Err(ClientError::TimeOut);
+            }
+            Err(_) => {
+                return Err(ClientError::LookupFailed);
             }
         }
 
-        println!(
-            "Received UDP response for {:?} {}: {:?}",
-            qtype, qname, packet
-        );
-
-        if let Ok(packet) = packet {
-            if !packet.header.truncated_message {
-                return Ok(packet);
-            }
-        } else {
-            return packet;
-        }
-
+        // If we reached here, the UDP response was truncated; retry over TCP
         println!("Truncated response - resending as TCP");
         self.send_tcp_query(qname, qtype, server, recursive).await
     }
@@ -377,7 +352,7 @@ pub mod tests {
     pub async fn test_udp_client() {
         let client = DnsNetworkClient::new(31456).await;
 
-        let mut rx = client
+        let rx = client
             .send_udp_query(
                 "google.com",
                 QueryType::A,
@@ -386,24 +361,23 @@ pub mod tests {
             )
             .await
             .unwrap();
-
         tokio::spawn(async move {
             client.run().await.unwrap();
         });
-        while let Some(res) = rx.recv().await {
-            let res = res.unwrap();
 
-            assert_eq!(res.questions[0].name, "google.com");
-            assert!(res.answers.len() > 0);
+        match rx.await {
+            Ok(Some(res)) => {
+                assert_eq!(res.questions[0].name, "google.com");
+                assert!(res.answers.len() > 0);
 
-            match res.answers[0] {
-                DnsRecord::A { ref domain, .. } => {
-                    assert_eq!("google.com", domain);
+                match res.answers[0] {
+                    DnsRecord::A { ref domain, .. } => {
+                        assert_eq!("google.com", domain);
+                    }
+                    _ => panic!(),
                 }
-                _ => panic!(),
             }
-
-            break;
+            Ok(None) | Err(_) => panic!("no response or timed out"),
         }
     }
 
