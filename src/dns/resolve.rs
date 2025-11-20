@@ -7,6 +7,7 @@ use std::vec::Vec;
 
 use async_trait::async_trait;
 use thiserror::Error;
+use tracing::{debug, info};
 
 use crate::dns::context::ServerContext;
 use crate::dns::protocol::{DnsPacket, QueryType, ResultCode};
@@ -56,14 +57,18 @@ pub trait DnsResolver: Send + Sync {
         }
 
         if let Some(qr) = context.cache.lookup(qname, qtype) {
+            debug!(?qtype, qname = %qname, "Cache hit");
             return Ok(qr);
         }
 
         if qtype == QueryType::A || qtype == QueryType::AAAA {
             if let Some(qr) = context.cache.lookup(qname, QueryType::CNAME) {
+                debug!(?qtype, qname = %qname, "CNAME Cache hit");
                 return Ok(qr);
             }
         }
+
+        debug!(?qtype, qname = %qname, "Cache miss, performing resolution");
 
         self.perform(qname, qtype).await
     }
@@ -79,10 +84,7 @@ pub struct ForwardingDnsResolver {
 
 impl ForwardingDnsResolver {
     pub fn new(context: Arc<ServerContext>, server: (IpAddr, u16)) -> ForwardingDnsResolver {
-        ForwardingDnsResolver {
-            context,
-            server,
-        }
+        ForwardingDnsResolver { context, server }
     }
 }
 
@@ -132,6 +134,9 @@ impl DnsResolver for RecursiveDnsResolver {
         // Find the closest name server by splitting the label and progessively
         // moving towards the root servers. I.e. check "google.com", then "com",
         // and finally "".
+
+        info!(?qtype, qname = %qname, "Searching for closest nameserver in cache");
+
         let mut tentative_ns = None;
 
         let labels = qname.split('.').collect::<Vec<&str>>();
@@ -153,7 +158,7 @@ impl DnsResolver for RecursiveDnsResolver {
                 None => continue,
             }
         }
-
+        info!(?qtype, qname = %qname, tentative_ns = ?tentative_ns, "Found tentative nameserver in cache");
         let mut ns = tentative_ns.ok_or_else(|| ResolveError::NoServerFound)?;
 
         // Start querying name servers

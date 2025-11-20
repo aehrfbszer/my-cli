@@ -20,15 +20,18 @@ mod dns;
 #[command(version, about, long_about = None)]
 struct Args {
     #[arg(short, long)]
-    forward: String,
+    forward: Option<String>,
 
     #[arg(short, long)]
     authority: bool,
 
+    #[arg(short, long)]
+    recursive: bool,
+
     #[arg(short, long, default_value_t = 5351)]
     port: u16,
     /// Log level (error, warn, info, debug, trace)
-    #[arg(long, default_value_t = String::from("info"))]
+    #[arg(short, long, default_value_t = String::from("info"))]
     log_level: String,
 }
 
@@ -62,20 +65,30 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     if let Some(ctx) = Arc::get_mut(&mut context) {
         let mut index_rootservers = true;
-        match args.forward.parse::<Ipv4Addr>().ok() {
-            Some(ip) => {
-                ctx.resolve_strategy = ResolveStrategy::Forward {
-                    host: IpAddr::V4(ip),
-                    port: 53,
-                };
-                index_rootservers = false;
-                info!(%ip, "Running as forwarder");
+
+        if let Some(forward) = args.forward {
+            match forward.parse::<Ipv4Addr>().ok() {
+                Some(ip) => {
+                    ctx.resolve_strategy = ResolveStrategy::Forward {
+                        host: IpAddr::V4(ip),
+                        port: 53,
+                    };
+                    index_rootservers = false;
+                    info!(%ip, "Running as forwarder");
+                }
+                None => {
+                    error!("Forward parameter must be a valid Ipv4 address");
+                    return Ok(());
+                }
             }
-            None => {
-                error!("Forward parameter must be a valid Ipv4 address");
+        } else {
+            if args.recursive {
+                ctx.resolve_strategy = ResolveStrategy::Recursive;
+            } else {
+                error!("Forward or recursive parameter must be provided");
                 return Ok(());
             }
-        }
+        };
 
         if args.authority {
             ctx.allow_recursive = false;

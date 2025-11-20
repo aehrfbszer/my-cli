@@ -115,6 +115,7 @@ pub async fn execute_query(context: Arc<ServerContext>, request: &DnsPacket) -> 
         info!(domain = %question.name, "Processing question");
 
         let mut resolver = context.create_resolver(context.clone());
+        info!("Created resolver");
         let rescode = match resolver
             .resolve(
                 &question.name,
