@@ -5,14 +5,14 @@ use dns::{
     protocol::{DnsRecord, TransientTtl},
     server::{DnsServer, DnsTcpServer, DnsUdpServer},
 };
-use tokio::time::interval;
-use tracing::{info, error, warn, debug};
 use std::{
     error::Error,
-    net::{IpAddr, Ipv4Addr, UdpSocket},
+    net::{IpAddr, Ipv4Addr},
     sync::Arc,
     time::Duration,
 };
+use tokio::time::interval;
+use tracing::{debug, error, info};
 
 mod dns;
 
@@ -25,7 +25,7 @@ struct Args {
     #[arg(short, long)]
     authority: bool,
 
-    #[arg(short, long, default_value_t = 5353)]
+    #[arg(short, long, default_value_t = 5351)]
     port: u16,
     /// Log level (error, warn, info, debug, trace)
     #[arg(long, default_value_t = String::from("info"))]
@@ -63,16 +63,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if let Some(ctx) = Arc::get_mut(&mut context) {
         let mut index_rootservers = true;
         match args.forward.parse::<Ipv4Addr>().ok() {
-                Some(ip) => {
+            Some(ip) => {
                 ctx.resolve_strategy = ResolveStrategy::Forward {
                     host: IpAddr::V4(ip),
                     port: 53,
                 };
                 index_rootservers = false;
-                    info!(%ip, "Running as forwarder");
+                info!(%ip, "Running as forwarder");
             }
             None => {
-                    error!("Forward parameter must be a valid Ipv4 address");
+                error!("Forward parameter must be a valid Ipv4 address");
                 return Ok(());
             }
         }

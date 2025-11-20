@@ -2,12 +2,13 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     hash::Hash,
     io,
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex},
 };
 
 use chrono::{DateTime, Duration, Local};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracing::warn;
 
 use super::protocol::{DnsPacket, DnsRecord, QueryType, ResultCode};
 
@@ -57,24 +58,14 @@ pub enum RecordSet {
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct DomainEntry {
-    pub domain: String,
     pub record_types: HashMap<QueryType, RecordSet>,
     pub hits: u32,
     pub updates: u32,
 }
 
 impl DomainEntry {
-    pub fn new(domain: String) -> DomainEntry {
-        DomainEntry {
-            domain,
-            record_types: HashMap::new(),
-            hits: 0,
-            updates: 0,
-        }
-    }
-
     pub fn store_nxdomain(&mut self, qtype: QueryType, ttl: u32) {
         self.updates += 1;
 
@@ -238,14 +229,19 @@ impl Cache {
             };
 
             self.domain_entries
-                .entry(domain.clone())
+                .entry(domain)
                 .and_modify(|rs| {
                     if let Some(rs) = Arc::get_mut(rs) {
                         rs.store_record(rec);
+                    } else {
+                        warn!(
+                            ?rs,
+                            "Failed to get mutable reference to DomainEntry while storing record"
+                        );
                     }
                 })
                 .or_insert_with(|| {
-                    let mut rs = DomainEntry::new(domain);
+                    let mut rs = DomainEntry::default();
                     rs.store_record(rec);
                     rs.into()
                 });
@@ -258,10 +254,16 @@ impl Cache {
             .and_modify(|rs| {
                 if let Some(rs) = Arc::get_mut(rs) {
                     rs.store_nxdomain(qtype, ttl);
+                } else {
+                    warn!(
+                        qname = %qname,
+                        ?qtype,
+                        "Failed to get mutable reference to DomainEntry while storing NXDOMAIN"
+                    );
                 }
             })
             .or_insert_with(|| {
-                let mut rs = DomainEntry::new(qname.to_string());
+                let mut rs = DomainEntry::default();
                 rs.store_nxdomain(qtype, ttl);
                 rs.into()
             });
@@ -270,33 +272,31 @@ impl Cache {
 
 #[derive(Default)]
 pub struct SynchronizedCache {
-    pub cache: RwLock<Cache>,
+    pub cache: Mutex<Cache>,
 }
 
 impl SynchronizedCache {
     pub fn new() -> SynchronizedCache {
         SynchronizedCache {
-            cache: RwLock::new(Cache::new()),
+            cache: Mutex::new(Cache::new()),
         }
     }
 
-    pub fn list(&self) -> Result<Vec<Arc<DomainEntry>>> {
+    pub fn list(&self) -> Result<Vec<(String,Arc<DomainEntry>)>> {
         let cache = self
             .cache
-            .read()
+            .lock()
             .map_err(|e| CacheError::PoisonedLock(e.to_string()))?;
 
-        let mut list = Vec::new();
 
-        for rs in cache.domain_entries.values() {
-            list.push(rs.clone());
-        }
+        let list = cache.domain_entries.clone();
+    
 
-        Ok(list)
+        Ok(list.into_iter().collect())
     }
 
     pub fn lookup(&self, qname: &str, qtype: QueryType) -> Option<DnsPacket> {
-        let mut cache = match self.cache.write() {
+        let mut cache = match self.cache.lock() {
             Ok(x) => x,
             Err(_) => return None,
         };
@@ -307,7 +307,7 @@ impl SynchronizedCache {
     pub fn store(&self, records: &[DnsRecord]) -> Result<()> {
         let mut cache = self
             .cache
-            .write()
+            .lock()
             .map_err(|e| CacheError::PoisonedLock(e.to_string()))?;
 
         cache.store(records);
@@ -318,7 +318,7 @@ impl SynchronizedCache {
     pub fn store_nxdomain(&self, qname: &str, qtype: QueryType, ttl: u32) -> Result<()> {
         let mut cache = self
             .cache
-            .write()
+            .lock()
             .map_err(|e| CacheError::PoisonedLock(e.to_string()))?;
 
         cache.store_nxdomain(qname, qtype, ttl);

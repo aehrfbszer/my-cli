@@ -59,28 +59,10 @@ impl QueryType {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, Ord, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct TransientTtl(pub u32);
 
-impl PartialEq<TransientTtl> for TransientTtl {
-    fn eq(&self, _: &TransientTtl) -> bool {
-        true
-    }
-}
-
-impl PartialOrd<TransientTtl> for TransientTtl {
-    fn partial_cmp(&self, _: &TransientTtl) -> Option<Ordering> {
-        Some(Ordering::Equal)
-    }
-}
-
-impl Hash for TransientTtl {
-    fn hash<H: std::hash::Hasher>(&self, _: &mut H) {
-        // purposely left empty
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum DnsRecord {
     UNKNOWN {
@@ -144,6 +126,104 @@ pub enum DnsRecord {
         flags: u32,
         data: String,
     }, // 41
+}
+
+// Zero-allocation key (by reference) for comparisons/hashing that excludes `ttl`.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum DnsRecordKeyRef<'a> {
+    A(&'a str, &'a Ipv4Addr),
+    AAAA(&'a str, &'a Ipv6Addr),
+    NS(&'a str, &'a str),
+    CNAME(&'a str, &'a str),
+    SOA(&'a str, &'a str, &'a str, u32, u32, u32, u32, u32),
+    MX(&'a str, u16, &'a str),
+    TXT(&'a str, &'a str),
+    SRV(&'a str, u16, u16, u16, &'a str),
+    OPT(u16, u32, &'a str),
+    UNKNOWN(&'a str, u16, u16),
+}
+
+impl<'a> DnsRecord {
+    fn key_ref(&'a self) -> DnsRecordKeyRef<'a> {
+        match self {
+            DnsRecord::A { domain, addr, .. } => DnsRecordKeyRef::A(domain.as_str(), addr),
+            DnsRecord::AAAA { domain, addr, .. } => DnsRecordKeyRef::AAAA(domain.as_str(), addr),
+            DnsRecord::NS { domain, host, .. } => DnsRecordKeyRef::NS(domain.as_str(), host.as_str()),
+            DnsRecord::CNAME { domain, host, .. } => DnsRecordKeyRef::CNAME(domain.as_str(), host.as_str()),
+            DnsRecord::SOA {
+                domain,
+                m_name,
+                r_name,
+                serial,
+                refresh,
+                retry,
+                expire,
+                minimum,
+                ..
+            } => DnsRecordKeyRef::SOA(
+                domain.as_str(),
+                m_name.as_str(),
+                r_name.as_str(),
+                *serial,
+                *refresh,
+                *retry,
+                *expire,
+                *minimum,
+            ),
+            DnsRecord::MX {
+                domain,
+                priority,
+                host,
+                ..
+            } => DnsRecordKeyRef::MX(domain.as_str(), *priority, host.as_str()),
+            DnsRecord::TXT { domain, data, .. } => DnsRecordKeyRef::TXT(domain.as_str(), data.as_str()),
+            DnsRecord::SRV {
+                domain,
+                priority,
+                weight,
+                port,
+                host,
+                ..
+            } => DnsRecordKeyRef::SRV(domain.as_str(), *priority, *weight, *port, host.as_str()),
+            DnsRecord::OPT {
+                packet_len,
+                flags,
+                data,
+            } => DnsRecordKeyRef::OPT(*packet_len, *flags, data.as_str()),
+            DnsRecord::UNKNOWN {
+                domain,
+                qtype,
+                data_len,
+                ..
+            } => DnsRecordKeyRef::UNKNOWN(domain.as_str(), *qtype, *data_len),
+        }
+    }
+}
+
+impl PartialEq for DnsRecord {
+    fn eq(&self, other: &Self) -> bool {
+        self.key_ref() == other.key_ref()
+    }
+}
+
+impl Eq for DnsRecord {}
+
+impl std::hash::Hash for DnsRecord {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.key_ref().hash(state);
+    }
+}
+
+impl PartialOrd for DnsRecord {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.key_ref().cmp(&other.key_ref()))
+    }
+}
+
+impl Ord for DnsRecord {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.key_ref().cmp(&other.key_ref())
+    }
 }
 
 impl DnsRecord {

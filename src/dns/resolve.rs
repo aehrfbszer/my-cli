@@ -80,8 +80,8 @@ pub struct ForwardingDnsResolver {
 impl ForwardingDnsResolver {
     pub fn new(context: Arc<ServerContext>, server: (IpAddr, u16)) -> ForwardingDnsResolver {
         ForwardingDnsResolver {
-            context: context,
-            server: server,
+            context,
+            server,
         }
     }
 }
@@ -292,9 +292,9 @@ mod tests {
 
             assert_eq!(1, list.len());
 
-            assert_eq!("google.com", list[0].domain);
-            assert_eq!(1, list[0].record_types.len());
-            assert_eq!(1, list[0].hits);
+            assert_eq!("google.com", list[0].0);
+            assert_eq!(1, list[0].1.record_types.len());
+            assert_eq!(1, list[0].1.hits);
         };
 
         // Do a failed lookup
@@ -575,18 +575,18 @@ mod tests {
             assert_eq!(3, list.len());
 
             // Check statistics for google entry
-            assert_eq!("google.com", list[1].domain);
+            assert_eq!("google.com", list[1].0);
 
             // Should have a NS record and an A record for a total of 2 record types
-            assert_eq!(2, list[1].record_types.len());
+            assert_eq!(2, list[1].1.record_types.len());
 
             // Should have been hit two times for NS google.com and once for
             // A google.com
-            assert_eq!(3, list[1].hits);
+            assert_eq!(3, list[1].1.hits);
 
-            assert_eq!("ns1.google.com", list[2].domain);
-            assert_eq!(1, list[2].record_types.len());
-            assert_eq!(2, list[2].hits);
+            assert_eq!("ns1.google.com", list[2].0);
+            assert_eq!(1, list[2].1.record_types.len());
+            assert_eq!(2, list[2].1.hits);
         };
     }
 }
