@@ -147,12 +147,18 @@ impl DnsResolver for RecursiveDnsResolver {
 
             debug!(?qtype, qname = %qname, domain = %domain, "Looking for NS record for domain");
 
+            // cache.lookup的实现：在缓存中查任何类型，都会在authorities中放ns记录
             match self
                 .context
                 .cache
                 .lookup(&domain, QueryType::NS)
                 .and_then(|qr| qr.get_unresolved_ns(&domain))
-                .and_then(|ns| self.context.cache.lookup(&ns, QueryType::A))
+                .and_then(|ns| {
+                    self.context
+                        .cache
+                        .lookup(&ns, QueryType::A)
+                        .or_else(|| self.context.cache.lookup(&ns, QueryType::AAAA))
+                })
                 .and_then(|qr| qr.get_random_ip())
             {
                 Some(addr) => {
@@ -213,6 +219,8 @@ impl DnsResolver for RecursiveDnsResolver {
                 Some(x) => x,
                 None => return Ok(response.clone()),
             };
+
+            debug!(?qtype, qname = %qname, new_ns_name = %new_ns_name, "Need to resolve NS name to IP");
 
             // Recursively resolve the NS
             let recursive_response = self.resolve(&new_ns_name, QueryType::A, true).await?;

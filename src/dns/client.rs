@@ -15,10 +15,10 @@ use tokio::{
     io::AsyncWriteExt,
     net::{TcpStream, UdpSocket},
     select,
-    sync::{oneshot},
+    sync::oneshot,
     time::interval,
 };
-use tracing::{debug, info, warn, error};
+use tracing::{debug, error, info, warn};
 
 use super::{
     buffer::{
@@ -77,13 +77,13 @@ pub struct DnsNetworkClient {
     socket: Arc<UdpSocket>,
 
     /// Queries in progress (map from seq id -> oneshot sender)
-        pending_queries: Arc<Mutex<HashMap<u16, PendingEntry>>>,
+    pending_queries: Arc<Mutex<HashMap<u16, PendingEntry>>>,
 }
 
-    struct PendingEntry {
-        timestamp: DateTime<Local>,
-        tx: oneshot::Sender<Option<DnsPacket>>,
-    }
+struct PendingEntry {
+    timestamp: DateTime<Local>,
+    tx: oneshot::Sender<Option<DnsPacket>>,
+}
 
 impl DnsNetworkClient {
     pub async fn new(port: u16) -> DnsNetworkClient {
@@ -247,6 +247,7 @@ impl DnsClient for DnsNetworkClient {
                                     if let Ok(mut pending_queries) = pending_queries_lock.lock() {
                                         if let Some(entry) = pending_queries.remove(&packet.header.id) {
                                             debug!(answers = ?packet.answers, "Received UDP answers");
+                                            debug!(authorities = ?packet.authorities, resources = ?packet.resources, "Received UDP authorities and resources");
                                             let _ = entry.tx.send(Some(packet.clone()));
                                         } else {
                                             debug!(question = ?packet.questions[0], "Discarding response");

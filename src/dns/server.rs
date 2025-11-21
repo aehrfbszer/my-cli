@@ -13,7 +13,7 @@ use tracing::{debug, error, info, warn};
 use crate::dns::buffer::{BytePacketBuffer, PacketBuffer, StreamPacketBuffer, VectorPacketBuffer};
 use crate::dns::context::ServerContext;
 use crate::dns::netutil::{read_packet_length, write_packet_length};
-use crate::dns::protocol::{DnsPacket, DnsRecord, QueryType, ResultCode};
+use crate::dns::protocol::{DnsPacket, DnsRecord, QueryType, ResultCode, TransientTtl};
 use crate::dns::resolve::DnsResolver;
 
 #[derive(Debug, Error)]
@@ -58,30 +58,103 @@ pub trait DnsServer {
     async fn run_server(self) -> Result<()>;
 }
 
-/// Utility function for resolving domains referenced in for example CNAME or SRV
-/// records. This usually spares the client from having to perform additional
-/// lookups.
-async fn resolve_cnames(
+/// Resolve referenced hosts found in answers (CNAME targets and SRV targets).
+///
+/// For each referenced host this will attempt A and AAAA lookups concurrently
+/// and append the resulting packets into `results`. For SRV targets the
+/// resolved A/AAAA records are placed into the packet's `resources` (additional)
+/// field so they appear as additional records in the final response.
+///
+/// `depth` guards recursion depth to avoid infinite loops.
+async fn resolve_referenced_hosts(
     lookup_list: &[DnsRecord],
     results: &mut Vec<DnsPacket>,
-    resolver: &mut Box<dyn DnsResolver>,
+    context: Arc<ServerContext>,
     depth: u16,
 ) {
     if depth > 10 {
         return;
     }
 
-    for ref rec in lookup_list {
-        match **rec {
-            DnsRecord::CNAME { ref host, .. } | DnsRecord::SRV { ref host, .. } => {
-                if let Ok(result2) = resolver.resolve(host, QueryType::A, true).await {
-                    let new_unmatched = result2.get_unresolved_cnames();
-                    results.push(result2);
+    for rec in lookup_list {
+        match rec {
+            &DnsRecord::CNAME { ref host, .. } => {
+                let host_str = host.as_str();
 
-                    let feature = resolve_cnames(&new_unmatched, results, resolver, depth + 1);
-                    Box::pin(feature).await;
+                let mut r_a = context.create_resolver(context.clone());
+                let mut r_aaaa = context.create_resolver(context.clone());
+
+                let (res_a, res_aaaa) = tokio::join!(
+                    r_a.resolve(host_str, QueryType::A, true),
+                    r_aaaa.resolve(host_str, QueryType::AAAA, true)
+                );
+
+                if let Ok(result2) = res_a {
+                        let new_unmatched = result2.get_unresolved_targets();
+                        results.push(result2);
+                        Box::pin(resolve_referenced_hosts(
+                            &new_unmatched,
+                            results,
+                            context.clone(),
+                            depth + 1,
+                        ))
+                        .await;
+                }
+
+                if let Ok(result2) = res_aaaa {
+                    let new_unmatched = result2.get_unresolved_targets();
+                    results.push(result2);
+                    Box::pin(resolve_referenced_hosts(
+                        &new_unmatched,
+                        results,
+                        context.clone(),
+                        depth + 1,
+                    ))
+                    .await;
                 }
             }
+
+            &DnsRecord::SRV { ref host, .. } => {
+                let host_str = host.as_str();
+
+                let mut r_a = context.create_resolver(context.clone());
+                let mut r_aaaa = context.create_resolver(context.clone());
+
+                let (res_a, res_aaaa) = tokio::join!(
+                    r_a.resolve(host_str, QueryType::A, true),
+                    r_aaaa.resolve(host_str, QueryType::AAAA, true)
+                );
+
+                if let Ok(mut result2) = res_a {
+                    // Move answers into resources so they become additional records
+                    let answers = std::mem::take(&mut result2.answers);
+                    result2.resources = answers;
+                    let new_unmatched = result2.get_unresolved_targets();
+                    results.push(result2);
+                    Box::pin(resolve_referenced_hosts(
+                        &new_unmatched,
+                        results,
+                        context.clone(),
+                        depth + 1,
+                    ))
+                    .await;
+                }
+
+                if let Ok(mut result2) = res_aaaa {
+                    let answers = std::mem::take(&mut result2.answers);
+                    result2.resources = answers;
+                    let new_unmatched = result2.get_unresolved_targets();
+                    results.push(result2);
+                    Box::pin(resolve_referenced_hosts(
+                        &new_unmatched,
+                        results,
+                        context.clone(),
+                        depth + 1,
+                    ))
+                    .await;
+                }
+            }
+
             _ => {}
         }
     }
@@ -108,7 +181,8 @@ pub async fn execute_query(context: Arc<ServerContext>, request: &DnsPacket) -> 
     } else {
         let mut results = Vec::new();
 
-        debug!("Executing query: {:?}", request);
+        // debug!("Executing query: {:?}", request);
+        debug!(?request.questions, "Executing query");
 
         let question = &request.questions[0];
         packet.questions.push(question.clone());
@@ -130,10 +204,12 @@ pub async fn execute_query(context: Arc<ServerContext>, request: &DnsPacket) -> 
                 info!(qtype = ?question.qtype, qname = %question.name, "Successfully resolved");
                 let rescode = result.header.rescode;
 
-                let unmatched = result.get_unresolved_cnames();
+                // 检查answers中的所有记录，如果是 CNAME/SRV 且目标没有 A/AAAA，则继续解析
+                let unmatched = result.get_unresolved_targets();
                 results.push(result);
 
-                resolve_cnames(&unmatched, &mut results, &mut resolver, 0).await;
+                // 继续解析（并发查询 A/AAAA）
+                resolve_referenced_hosts(&unmatched, &mut results, context.clone(), 0).await;
 
                 rescode
             }
@@ -145,15 +221,60 @@ pub async fn execute_query(context: Arc<ServerContext>, request: &DnsPacket) -> 
 
         packet.header.rescode = rescode;
 
+        // Merge results into packet with deduplication and TTL merging.
+        let add_with_dedupe = |vec: &mut Vec<DnsRecord>, rec: DnsRecord| {
+            // Find existing equal record (DnsRecord Eq ignores ttl)
+            if let Some(idx) = vec.iter().position(|e| e == &rec) {
+                // Merge TTL: keep the smaller TTL
+                let existing = &mut vec[idx];
+                fn get_ttl(r: &DnsRecord) -> u32 {
+                    match r {
+                        DnsRecord::A { ttl, .. } => ttl.0,
+                        DnsRecord::AAAA { ttl, .. } => ttl.0,
+                        DnsRecord::NS { ttl, .. } => ttl.0,
+                        DnsRecord::CNAME { ttl, .. } => ttl.0,
+                        DnsRecord::SOA { ttl, .. } => ttl.0,
+                        DnsRecord::MX { ttl, .. } => ttl.0,
+                        DnsRecord::TXT { ttl, .. } => ttl.0,
+                        DnsRecord::SRV { ttl, .. } => ttl.0,
+                        DnsRecord::UNKNOWN { ttl, .. } => ttl.0,
+                        DnsRecord::OPT { .. } => u32::MAX,
+                    }
+                }
+
+                fn set_ttl(r: &mut DnsRecord, new_ttl: u32) {
+                    match r {
+                        DnsRecord::A { ttl, .. } => *ttl = TransientTtl(new_ttl),
+                        DnsRecord::AAAA { ttl, .. } => *ttl = TransientTtl(new_ttl),
+                        DnsRecord::NS { ttl, .. } => *ttl = TransientTtl(new_ttl),
+                        DnsRecord::CNAME { ttl, .. } => *ttl = TransientTtl(new_ttl),
+                        DnsRecord::SOA { ttl, .. } => *ttl = TransientTtl(new_ttl),
+                        DnsRecord::MX { ttl, .. } => *ttl = TransientTtl(new_ttl),
+                        DnsRecord::TXT { ttl, .. } => *ttl = TransientTtl(new_ttl),
+                        DnsRecord::SRV { ttl, .. } => *ttl = TransientTtl(new_ttl),
+                        DnsRecord::UNKNOWN { ttl, .. } => *ttl = TransientTtl(new_ttl),
+                        DnsRecord::OPT { .. } => {}
+                    }
+                }
+
+                let existing_ttl = get_ttl(existing);
+                let new_ttl = get_ttl(&rec);
+                let min_ttl = existing_ttl.min(new_ttl);
+                set_ttl(existing, min_ttl);
+            } else {
+                vec.push(rec);
+            }
+        };
+
         for result in results {
             for rec in result.answers {
-                packet.answers.push(rec);
+                add_with_dedupe(&mut packet.answers, rec);
             }
             for rec in result.authorities {
-                packet.authorities.push(rec);
+                add_with_dedupe(&mut packet.authorities, rec);
             }
             for rec in result.resources {
-                packet.resources.push(rec);
+                add_with_dedupe(&mut packet.resources, rec);
             }
         }
     }

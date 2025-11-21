@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::{
     cmp::Ordering,
     fmt::{self, Display},
@@ -8,10 +9,7 @@ use std::{
 use rand::seq::IndexedRandom;
 use serde::{Deserialize, Serialize};
 
-use super::{
-    DISABLE_V6, PERFER_V6,
-    buffer::{PacketBuffer, Result, VectorPacketBuffer},
-};
+use super::buffer::{PacketBuffer, Result, VectorPacketBuffer};
 
 #[derive(PartialEq, Eq, Debug, Clone, Hash, Copy, Serialize, Deserialize)]
 pub enum QueryType {
@@ -148,8 +146,12 @@ impl<'a> DnsRecord {
         match self {
             DnsRecord::A { domain, addr, .. } => DnsRecordKeyRef::A(domain.as_str(), addr),
             DnsRecord::AAAA { domain, addr, .. } => DnsRecordKeyRef::AAAA(domain.as_str(), addr),
-            DnsRecord::NS { domain, host, .. } => DnsRecordKeyRef::NS(domain.as_str(), host.as_str()),
-            DnsRecord::CNAME { domain, host, .. } => DnsRecordKeyRef::CNAME(domain.as_str(), host.as_str()),
+            DnsRecord::NS { domain, host, .. } => {
+                DnsRecordKeyRef::NS(domain.as_str(), host.as_str())
+            }
+            DnsRecord::CNAME { domain, host, .. } => {
+                DnsRecordKeyRef::CNAME(domain.as_str(), host.as_str())
+            }
             DnsRecord::SOA {
                 domain,
                 m_name,
@@ -176,7 +178,9 @@ impl<'a> DnsRecord {
                 host,
                 ..
             } => DnsRecordKeyRef::MX(domain.as_str(), *priority, host.as_str()),
-            DnsRecord::TXT { domain, data, .. } => DnsRecordKeyRef::TXT(domain.as_str(), data.as_str()),
+            DnsRecord::TXT { domain, data, .. } => {
+                DnsRecordKeyRef::TXT(domain.as_str(), data.as_str())
+            }
             DnsRecord::SRV {
                 domain,
                 priority,
@@ -994,54 +998,53 @@ impl DnsPacket {
     /// get multiple IP's for a single name, it doesn't matter which one we
     /// choose, so in those cases we can now pick one at random.
     pub fn get_random_ip(&self) -> Option<IpAddr> {
-        let perfer_v6 = PERFER_V6.get_or_init(|| false);
-        let disable_v6 = DISABLE_V6.get_or_init(|| false);
-
         let vec = self
             .answers
             .iter()
             .filter_map(|record| match record {
-                DnsRecord::A { addr, .. } => {
-                    if *perfer_v6 {
-                        None
-                    } else {
-                        Some(IpAddr::V4(*addr))
-                    }
-                }
-                DnsRecord::AAAA { addr, .. } => {
-                    if *disable_v6 {
-                        None
-                    } else {
-                        Some(IpAddr::V6(*addr))
-                    }
-                }
+                DnsRecord::A { addr, .. } => Some(IpAddr::V4(*addr)),
+                DnsRecord::AAAA { addr, .. } => Some(IpAddr::V6(*addr)),
                 _ => None,
             })
             .collect::<Vec<_>>();
-        if vec.is_empty() {
-            None
-        } else {
-            Some(vec.choose(&mut rand::rng()).unwrap().clone())
-        }
+        vec.choose(&mut rand::rng()).cloned()
     }
 
-    pub fn get_unresolved_cnames(&self) -> Vec<DnsRecord> {
+    /// Return a list of CNAME/SRV records from `answers` whose target
+    /// hosts do not yet have A/AAAA records present in `answers` or `resources`.
+    ///
+    /// The returned records are those that require further resolution (i.e.
+    /// additional A/AAAA lookups). Results are de-duplicated by host.
+    pub fn get_unresolved_targets(&self) -> Vec<DnsRecord> {
         let mut unresolved = Vec::new();
+        let mut seen_hosts: HashSet<String> = HashSet::new();
+
+        // Helper to check if a host has an A/AAAA record in answers or resources
+        let has_ip = |host: &str, pkt: &DnsPacket| -> bool {
+            pkt.answers
+                .iter()
+                .chain(pkt.resources.iter())
+                .any(|r| match r {
+                    DnsRecord::A { domain, .. } | DnsRecord::AAAA { domain, .. } => domain == host,
+                    _ => false,
+                })
+        };
+
         for answer in &self.answers {
-            let mut matched = false;
-            if let DnsRecord::CNAME { ref host, .. } = *answer {
-                for answer2 in &self.answers {
-                    if let DnsRecord::A { ref domain, .. } = *answer2 {
-                        if domain == host {
-                            matched = true;
-                            break;
-                        }
+            match answer {
+                DnsRecord::CNAME { host, .. } | DnsRecord::SRV { host, .. } => {
+                    if seen_hosts.contains(host) {
+                        continue;
+                    }
+
+                    // If we already have an A/AAAA for this host in answers or resources,
+                    // then it is resolved and doesn't need further queries.
+                    if !has_ip(host, self) {
+                        unresolved.push(answer.clone());
+                        seen_hosts.insert(host.clone());
                     }
                 }
-            }
-
-            if !matched {
-                unresolved.push(answer.clone());
+                _ => {}
             }
         }
 
@@ -1068,8 +1071,6 @@ impl DnsPacket {
     /// A records when replying to an NS query to implement a function that
     /// returns the actual IP for an NS record if possible.
     pub fn get_resolved_ns(&self, qname: &str) -> Option<IpAddr> {
-        let perfer_v6 = PERFER_V6.get_or_init(|| false);
-        let disable_v6 = DISABLE_V6.get_or_init(|| false);
         // Get an iterator over the nameservers in the authorities section
         let vec = self
             .get_ns(qname)
@@ -1083,18 +1084,10 @@ impl DnsPacket {
                     // of the NS record that we are currently processing
                     .filter_map(move |record| match record {
                         DnsRecord::A { domain, addr, .. } if domain == host => {
-                            if *perfer_v6 {
-                                None
-                            } else {
-                                Some(IpAddr::V4(*addr))
-                            }
+                            Some(IpAddr::V4(*addr))
                         }
                         DnsRecord::AAAA { domain, addr, .. } if domain == host => {
-                            if *disable_v6 {
-                                None
-                            } else {
-                                Some(IpAddr::V6(*addr))
-                            }
+                            Some(IpAddr::V6(*addr))
                         }
                         _ => None,
                     })
