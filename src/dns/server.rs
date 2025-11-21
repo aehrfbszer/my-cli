@@ -268,12 +268,37 @@ pub async fn execute_query(context: Arc<ServerContext>, request: &DnsPacket) -> 
 
         for result in results {
             for rec in result.answers {
-                add_with_dedupe(&mut packet.answers, rec);
+                // Only include answer RRs that either are CNAMEs (always relevant)
+                // or match the original question type. This prevents returning A
+                // records when the client asked only for AAAA.
+                let should_add = match &rec {
+                    DnsRecord::CNAME { .. } => true,
+                    // If the original query was for CNAME, include resolved A/AAAA
+                    // answers alongside the CNAME so tests and clients that expect
+                    // the target address in the answer still receive them.
+                    DnsRecord::A { .. } => question.qtype == QueryType::A || question.qtype == QueryType::CNAME,
+                    DnsRecord::AAAA { .. } => question.qtype == QueryType::AAAA || question.qtype == QueryType::CNAME,
+                    DnsRecord::NS { .. } => question.qtype == QueryType::NS,
+                    DnsRecord::SOA { .. } => question.qtype == QueryType::SOA,
+                    DnsRecord::MX { .. } => question.qtype == QueryType::MX,
+                    DnsRecord::TXT { .. } => question.qtype == QueryType::TXT,
+                    DnsRecord::SRV { .. } => question.qtype == QueryType::SRV,
+                    DnsRecord::UNKNOWN { .. } => matches!(question.qtype, QueryType::UNKNOWN(_)),
+                    DnsRecord::OPT { .. } => true,
+                };
+
+                if should_add {
+                    add_with_dedupe(&mut packet.answers, rec);
+                }
             }
+
             for rec in result.authorities {
                 add_with_dedupe(&mut packet.authorities, rec);
             }
+
             for rec in result.resources {
+                // Resources (additional section) may include A/AAAA glue regardless
+                // of the original qtype, so include them all.
                 add_with_dedupe(&mut packet.resources, rec);
             }
         }
