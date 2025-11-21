@@ -8,7 +8,7 @@ use std::{
 use chrono::{DateTime, Duration, Local};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::protocol::{DnsPacket, DnsRecord, QueryType, ResultCode};
 
@@ -282,15 +282,13 @@ impl SynchronizedCache {
         }
     }
 
-    pub fn list(&self) -> Result<Vec<(String,Arc<DomainEntry>)>> {
+    pub fn list(&self) -> Result<Vec<(String, Arc<DomainEntry>)>> {
         let cache = self
             .cache
             .lock()
             .map_err(|e| CacheError::PoisonedLock(e.to_string()))?;
 
-
         let list = cache.domain_entries.clone();
-    
 
         Ok(list.into_iter().collect())
     }
@@ -305,10 +303,10 @@ impl SynchronizedCache {
     }
 
     pub fn store(&self, records: &[DnsRecord]) -> Result<()> {
-        let mut cache = self
-            .cache
-            .lock()
-            .map_err(|e| CacheError::PoisonedLock(e.to_string()))?;
+        let mut cache = self.cache.lock().map_err(|e| {
+            debug!(?e, "Failed to acquire cache lock, cannot store records");
+            CacheError::PoisonedLock(e.to_string())
+        })?;
 
         cache.store(records);
 
@@ -316,10 +314,10 @@ impl SynchronizedCache {
     }
 
     pub fn store_nxdomain(&self, qname: &str, qtype: QueryType, ttl: u32) -> Result<()> {
-        let mut cache = self
-            .cache
-            .lock()
-            .map_err(|e| CacheError::PoisonedLock(e.to_string()))?;
+        let mut cache = self.cache.lock().map_err(|e| {
+            debug!(?e, "Failed to acquire cache lock, cannot store NXDOMAIN");
+            CacheError::PoisonedLock(e.to_string())
+        })?;
 
         cache.store_nxdomain(qname, qtype, ttl);
 

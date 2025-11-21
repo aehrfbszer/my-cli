@@ -1,7 +1,6 @@
 use clap::Parser;
 use dns::{
     context::{ResolveStrategy, ServerContext},
-    handle_query,
     protocol::{DnsRecord, TransientTtl},
     server::{DnsServer, DnsTcpServer, DnsUdpServer},
 };
@@ -51,15 +50,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt().with_max_level(level).init();
 
     info!("Starting my-cli");
-
-    // let socket = UdpSocket::bind(("0.0.0.0", 2053))?;
-
-    // loop {
-    //     match handle_query(&socket).await {
-    //         Ok(_) => {}
-    //         Err(e) => eprintln!("An error occurred: {}", e),
-    //     }
-    // }
 
     let mut context = Arc::new(ServerContext::new().await);
 

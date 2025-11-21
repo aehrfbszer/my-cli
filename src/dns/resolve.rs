@@ -140,8 +140,12 @@ impl DnsResolver for RecursiveDnsResolver {
         let mut tentative_ns = None;
 
         let labels = qname.split('.').collect::<Vec<&str>>();
-        for lbl_idx in 0..labels.len() + 1 {
+
+        debug!(?qtype, qname = %qname, labels = ?labels, "Split qname into labels");
+        for lbl_idx in 0..=labels.len() {
             let domain = labels[lbl_idx..].join(".");
+
+            debug!(?qtype, qname = %qname, domain = %domain, "Looking for NS record for domain");
 
             match self
                 .context
@@ -163,7 +167,7 @@ impl DnsResolver for RecursiveDnsResolver {
 
         // Start querying name servers
         loop {
-            tracing::debug!(?qtype, qname = %qname, ns = %ns, "attempting lookup with nameserver");
+            debug!(?qtype, qname = %qname, ns = %ns, "attempting lookup with nameserver");
 
             let ns_copy = ns.clone();
 
@@ -176,6 +180,8 @@ impl DnsResolver for RecursiveDnsResolver {
 
             // If we've got an actual answer, we're done!
             if !response.answers.is_empty() && response.header.rescode == ResultCode::NOERROR {
+                // 这里说明已经找到对应的ns服务器，并通过它成功解析出了结果
+                // 如果ns服务器是属于上级的，它的answers是空，不会进入这里（但是AUTHORITY SECTION， ADDITIONAL SECTION会有下一级的信息）
                 let _ = self.context.cache.store(&response.answers);
                 let _ = self.context.cache.store(&response.authorities);
                 let _ = self.context.cache.store(&response.resources);
@@ -183,6 +189,7 @@ impl DnsResolver for RecursiveDnsResolver {
             }
 
             if response.header.rescode == ResultCode::NXDOMAIN {
+                // 进入这里，说明已经确定域名不存在(类似于查 fsdf.gderg.df ,可能在根服务器就发现 df不存在 ，就是 NXDOMAIN 了)
                 if let Some(ttl) = response.get_ttl_from_soa() {
                     let _ = self.context.cache.store_nxdomain(qname, qtype, ttl);
                 }
